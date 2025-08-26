@@ -1,0 +1,222 @@
+{
+  "identifier" : "F4A5B2C8",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "1.49",
+      "familyShareable" : false,
+      "internalID" : "6736123456",
+      "localizations" : [
+        {
+          "description" : "100 tokens for AI features and premium content",
+          "displayName" : "100 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_100",
+      "referenceName" : "100 Tokens",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "7.49",
+      "familyShareable" : false,
+      "internalID" : "6736123457",
+      "localizations" : [
+        {
+          "description" : "500 tokens for AI features and premium content",
+          "displayName" : "500 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_500",
+      "referenceName" : "500 Tokens",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "14.99",
+      "familyShareable" : false,
+      "internalID" : "6736123458",
+      "localizations" : [
+        {
+          "description" : "1,000 tokens for AI features and premium content",
+          "displayName" : "1,000 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_1000",
+      "referenceName" : "1,000 Tokens",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "30.99",
+      "familyShareable" : false,
+      "internalID" : "6736123459",
+      "localizations" : [
+        {
+          "description" : "5,000 tokens for AI features and premium content",
+          "displayName" : "5,000 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_5000",
+      "referenceName" : "5,000 Tokens",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "62.99",
+      "familyShareable" : false,
+      "internalID" : "6736123460",
+      "localizations" : [
+        {
+          "description" : "25,000 tokens for AI features and premium content",
+          "displayName" : "25,000 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_25000",
+      "referenceName" : "25,000 Tokens",
+      "type" : "Consumable"
+    },
+    {
+      "displayPrice" : "159.99",
+      "familyShareable" : false,
+      "internalID" : "6736123461",
+      "localizations" : [
+        {
+          "description" : "100,000 tokens for AI features and premium content",
+          "displayName" : "100,000 Tokens",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "tokens_100000",
+      "referenceName" : "100,000 Tokens",
+      "type" : "Consumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "6751433053",
+    "_developerTeamID" : "YOUR_TEAM_ID",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 737079660.32838202,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Load Products"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Purchase"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Verification"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Store Sync"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Subscription Status"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Transaction"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Manage Subscriptions Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Refund Request Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Offer Code Redeem Sheet"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "21234567",
+      "localizations" : [
+        {
+          "description" : "Premium subscription with full access to all features",
+          "displayName" : "Premium Access",
+          "locale" : "en_US"
+        }
+      ],
+      "name" : "Premium Subscriptions",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "10.00",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "6736123462",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Monthly premium subscription with unlimited AI features",
+              "displayName" : "Monthly Premium",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "monthly_subscription",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Monthly subscription",
+          "subscriptionGroupID" : "21234567",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "100.00",
+          "familyShareable" : false,
+          "groupNumber" : 2,
+          "internalID" : "6736123463",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Yearly premium subscription with unlimited AI features and savings",
+              "displayName" : "Yearly Premium",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "yearly_subscription",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Yearly subscription",
+          "subscriptionGroupID" : "21234567",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}
