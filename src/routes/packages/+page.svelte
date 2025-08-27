@@ -10,6 +10,9 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
+  import { processSuccessfulPurchase } from "$lib/utils/iapDatabase";
+  import { userStore } from "$lib/stores/userStore";
+  import { authStore } from "$lib/stores/unifiedAuth";
 
 
   let purchasingProduct = "";
@@ -109,18 +112,41 @@
           recentTransaction.productId === productId &&
           recentTransaction.status === "purchased"
         ) {
+          // Save successful in-app purchase to database
+          const recentPurchase = currentState.purchases[currentState.purchases.length - 1];
+          if (recentPurchase) {
+            try {
+              // Get user ID from auth context
+              const authState = await authStore.getState();
+              if (!authState.user?.id) {
+                throw new Error('No authenticated user found');
+              }
+              
+              await processSuccessfulPurchase(
+                authState.user.id,
+                recentPurchase,
+                recentTransaction,
+                "consumable"
+              );
+              
+              // Update user store with new token balance
+              await userStore.updateTokenBalance();
+            } catch (dbError) {
+              console.error("Failed to save token purchase to database:", dbError);
+              // Still show success to user since IAP completed
+            }
+          }
+          
           toast.success("✅ Purchase completed successfully!");
         } else {
           toast.error("❌ Purchase failed or was cancelled");
         }
       } else {
-        // No purchase record created - likely cancelled or failed
         toast.error("❌ Purchase was cancelled or failed");
       }
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Purchase failed";
-      toast.error(`❌ Purchase failed: ${errorMessage}`);
+      console.error("Purchase error:", error);
+      toast.error(`❌ Purchase error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       purchasingProduct = "";
     }

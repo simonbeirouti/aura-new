@@ -23,6 +23,10 @@
     } from "$lib/components/ui/tabs";
     import { CalendarIcon, CrownIcon } from "lucide-svelte";
     import { toast } from "svelte-sonner";
+    import { processSuccessfulPurchase } from "$lib/utils/iapDatabase";
+    import { userStore } from "$lib/stores/userStore";
+    import { authStore } from "$lib/stores/unifiedAuth";
+
 
     let purchasingProduct = "";
     let selectedTab = "monthly";
@@ -123,18 +127,41 @@
                     recentTransaction.productId === productId &&
                     recentTransaction.status === "purchased"
                 ) {
+                    // Save successful subscription purchase to database
+                    const recentPurchase = currentState.purchases[currentState.purchases.length - 1];
+                    if (recentPurchase) {
+                        try {
+                            // Get user ID from auth context
+                            const authState = await authStore.getState();
+                            if (!authState.user?.id) {
+                                throw new Error('No authenticated user found');
+                            }
+                            
+                            await processSuccessfulPurchase(
+                                authState.user.id,
+                                recentPurchase,
+                                recentTransaction,
+                                "subscription"
+                            );
+                            
+                            // Update user store with new subscription data
+                            await userStore.updateSubscriptions();
+                        } catch (dbError) {
+                            console.error("Failed to save subscription to database:", dbError);
+                            // Still show success to user since IAP completed
+                        }
+                    }
+                    
                     toast.success("✅ Subscription completed successfully!");
                 } else {
                     toast.error("❌ Subscription failed or was cancelled");
                 }
             } else {
-                // No purchase record created - likely cancelled or failed
                 toast.error("❌ Subscription was cancelled or failed");
             }
         } catch (error) {
-            const errorMessage =
-                error instanceof Error ? error.message : "Subscription failed";
-            toast.error(`❌ Subscription failed: ${errorMessage}`);
+            console.error("Subscription error:", error);
+            toast.error(`❌ Subscription error: ${error instanceof Error ? error.message : 'Unknown error'}`);
         } finally {
             purchasingProduct = "";
         }

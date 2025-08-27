@@ -3,6 +3,7 @@ import { createClient, type AuthSession, type User } from '@supabase/supabase-js
 import { sessionStore } from './sessionStore';
 import { dataActions } from './dataStore';
 import { storeManager } from './core/storeManager';
+import { userStore } from './userStore';
 
 // Supabase client setup with better error handling
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -235,18 +236,14 @@ class UnifiedAuthStore {
         const tokens = await sessionStore.getStoredTokens();
         if (tokens) {
           // Initialize Supabase client
-          const { createClient } = await import('@supabase/supabase-js');
-          const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-          const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-          
-          if (!supabaseUrl || !supabaseKey) {
+          if (!supabaseUrl || !supabaseAnonKey) {
             throw new Error('Missing Supabase configuration');
           }
           
-          const supabase = createClient(supabaseUrl, supabaseKey);
+          const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
           
           // Restore session if available
-          const { data: { session } } = await supabase.auth.getSession();
+          const { data: { session } } = await supabaseClient.auth.getSession();
           if (session) {
             await sessionStore.setAuthenticated(session.user, session);
             console.log('Session restored successfully');
@@ -293,7 +290,33 @@ class UnifiedAuthStore {
     }));
 
     // Store tokens securely in Tauri and session store
-    await sessionStore.setAuthenticated(user, session);
+    try {
+      await sessionStore.setAuthenticated(user, session);
+    } catch (error) {
+      console.error('❌ Failed to store session tokens:', error);
+      throw new Error(`Database error saving new user: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+
+    // Wait a moment for session store to be fully written
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Initialize user store with authenticated user
+    try {
+      await userStore.initialize(user.id);
+    } catch (error) {
+      console.error('❌ Failed to initialize user store:', error);
+      // For new users, this is expected - they don't have database records yet
+      // Don't fail authentication if user store initialization fails
+    }
+
+    // Load user profile data
+    try {
+      await this.refreshProfile();
+    } catch (error) {
+      console.error('❌ Failed to load user profile:', error);
+      // Don't fail authentication if profile loading fails
+      // This is expected for new users who haven't created a profile yet
+    }
 
     // Start token refresh monitoring
     this.scheduleTokenRefresh();
@@ -307,6 +330,13 @@ class UnifiedAuthStore {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
+    }
+
+    // Reset user store
+    try {
+      userStore.reset();
+    } catch (error) {
+      console.error('❌ Failed to reset user store:', error);
     }
 
     this.store.update(state => ({
@@ -356,13 +386,12 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase auth
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      const { data, error } = await supabase.auth.signUp({
+      const { data, error } = await supabaseClient.auth.signUp({
         email,
         password
       });
@@ -373,11 +402,9 @@ class UnifiedAuthStore {
       
       if (data.user && data.session) {
         await this.setAuthenticated(data.user, data.session);
-        console.log('Signup successful');
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Sign up failed';
-      console.error('Sign up failed:', error);
       this.store.update(state => ({
         ...state,
         error: errorMessage,
@@ -398,13 +425,12 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase auth
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
         email,
         password
       });
@@ -415,11 +441,9 @@ class UnifiedAuthStore {
       
       if (data.user && data.session) {
         await this.setAuthenticated(data.user, data.session);
-        console.log('Login successful');
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Login failed';
-      console.error('Login failed:', error);
       this.store.update(state => ({
         ...state,
         error: errorMessage,
@@ -439,16 +463,14 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase signout
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      await supabase.auth.signOut();
+      await supabaseClient.auth.signOut();
       await sessionStore.setUnauthenticated();
     } catch (error) {
-      console.error('Logout failed:', error);
       // Force clear session even if Supabase signout fails
       try {
         await this.setUnauthenticated(
@@ -457,7 +479,11 @@ class UnifiedAuthStore {
       } catch (sessionError) {
         console.error('Failed to clear session:', sessionError);
         // Last resort: manually clear Supabase session
-        await supabase.auth.signOut({ scope: 'local' });
+        const fallbackClient = createClient(
+          import.meta.env.VITE_SUPABASE_URL,
+          import.meta.env.VITE_SUPABASE_ANON_KEY
+        );
+        await fallbackClient.auth.signOut({ scope: 'local' });
       }
     } finally {
       this.store.update(state => ({ ...state, isLoading: false }));
@@ -479,7 +505,6 @@ class UnifiedAuthStore {
         await this.setAuthenticated(data.user, data.session);
       }
     } catch (error) {
-      console.error('Session refresh failed:', error);
       // If refresh fails, logout
       await this.handleLogout();
       throw error;
@@ -501,7 +526,7 @@ class UnifiedAuthStore {
 
       this.store.update(s => ({ ...s, profile, profileLoaded: true }));
     } catch (error) {
-      console.error('Failed to refresh profile:', error);
+      throw error;
     }
   }
 

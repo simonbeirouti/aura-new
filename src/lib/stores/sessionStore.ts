@@ -92,7 +92,11 @@ class SessionStore {
     }));
 
     // Store tokens securely in Tauri
-    await this.storeTokensSecurely(session.access_token, session.refresh_token);
+    try {
+      await this.storeTokensSecurely(session.access_token, session.refresh_token);
+    } catch (error) {
+      throw error;
+    }
     
     // Start token refresh monitoring
     this.scheduleTokenRefresh();
@@ -185,8 +189,14 @@ class SessionStore {
           refreshToken
         }
       });
+
+      // Also initialize database configuration for IAP functions
+      await invoke('init_database', {
+        databaseUrl: import.meta.env.VITE_SUPABASE_URL,
+        accessToken,
+        anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY
+      });
     } catch (error) {
-      console.error('Failed to store tokens securely:', error);
       throw error;
     }
   }
@@ -195,7 +205,7 @@ class SessionStore {
     try {
       await invoke('logout');
     } catch (error) {
-      console.error('Failed to clear tokens:', error);
+      throw error;
     }
   }
 

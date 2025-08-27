@@ -3,6 +3,7 @@
     import AppLayout from "$lib/components/AppLayout.svelte";
     import { centralizedAuth } from "$lib/stores/unifiedAuth";
     import { settingsActions, profileStore } from "$lib/stores/settingsStore";
+    import { availableTokens } from "$lib/stores/userStore";
     import { goto } from "$app/navigation";
     import {
         UserIcon,
@@ -10,6 +11,7 @@
         LogOut,
         CrownIcon,
         HistoryIcon,
+        CoinsIcon,
     } from "lucide-svelte";
     import { Card, CardContent } from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
@@ -93,14 +95,15 @@
                                     @{profile?.username || 'Not set'}
                                 </p>
                             </div>
-                            {#if profile?.full_name}
-                                <div>
-                                    <p class="text-sm text-muted-foreground mb-1">Full Name</p>
+                            <div>
+                                <p class="text-sm text-muted-foreground mb-1">Available Tokens</p>
+                                <div class="flex items-center gap-2">
+                                    <CoinsIcon class="w-5 h-5 text-yellow-500" />
                                     <p class="text-lg text-foreground font-medium">
-                                        {profile.full_name}
+                                        {$availableTokens || 0}
                                     </p>
                                 </div>
-                            {/if}
+                            </div>
                         </div>
                     </div>
                 </div>

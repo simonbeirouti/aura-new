@@ -4,6 +4,8 @@ mod session;
 mod database;
 // Enhanced store management module
 mod enhanced_store;
+// IAP database management module
+mod iap_database;
 
 use serde::{Deserialize, Serialize};
 
@@ -71,7 +73,14 @@ pub fn run() {
             enhanced_store::store_restore,
             enhanced_store::store_sync,
             enhanced_store::store_validate,
-            enhanced_store::store_health
+            enhanced_store::store_health,
+            // IAP database management commands
+            iap_database::save_iap_transaction,
+            iap_database::save_user_subscription,
+            iap_database::save_token_transaction,
+            iap_database::get_user_token_balance,
+            iap_database::get_user_subscriptions,
+            iap_database::update_subscription_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
