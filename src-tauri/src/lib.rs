@@ -35,75 +35,13 @@ fn get_platform_info() -> PlatformInfo {
     }
 }
 
-// Import required for environment variable loading
-#[cfg(not(target_os = "ios"))]
-use dotenv;
-
-// Load environment variables with cross-platform handling
-fn load_environment_variables() {
-    #[cfg(debug_assertions)]
-    println!("Loading environment variables for cross-platform compatibility");
-    
-    // On desktop platforms, try to load .env file at runtime
-    #[cfg(not(target_os = "ios"))]
-    {
-        let env_paths = [
-            ".env",           // Current directory
-            "../.env",        // Parent directory (common for Tauri apps)
-            "../../.env",     // Two levels up
-            "src-tauri/.env", // From project root
-        ];
-        
-        let mut loaded = false;
-        
-        // Try each path until one works
-        for path in &env_paths {
-            if let Ok(_) = dotenv::from_path(path) {
-                #[cfg(debug_assertions)]
-                println!("Loaded runtime environment variables from: {}", path);
-                loaded = true;
-                break;
-            }
-        }
-        
-        if !loaded {
-            #[cfg(debug_assertions)]
-            println!("No .env file found at runtime, using compile-time variables");
-        }
-    }
-    
-    // On iOS and other mobile platforms, rely on compile-time variables
-    #[cfg(target_os = "ios")]
-    {
-        #[cfg(debug_assertions)]
-        println!("iOS platform detected - using compile-time environment variables");
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Load environment variables from .env file with platform-specific handling
-    load_environment_variables();
-    
+pub fn run() {    
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_opener::init());
-    
-    // Enable IAP plugin for mobile platforms
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    {
-        builder = builder.plugin(tauri_plugin_iap::init());
-        #[cfg(debug_assertions)]
-        println!("IAP plugin enabled for mobile platform");
-    }
-    
-    // Disable IAP plugin for desktop platforms to prevent Swift concurrency crashes
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
-        #[cfg(debug_assertions)]
-        println!("IAP plugin disabled on desktop platforms to prevent Swift concurrency crashes");
-    }
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_iap::init());
     
     builder
         .invoke_handler(tauri::generate_handler![
