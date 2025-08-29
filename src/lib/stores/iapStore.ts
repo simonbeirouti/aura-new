@@ -724,8 +724,10 @@ function createIAPStore() {
     update(state => {
       const now = Date.now();
       const updatedSubscriptions = state.activeSubscriptions.map(sub => {
-        // Check if subscription has expired
-        if (sub.expiryTime && sub.expiryTime < now && sub.subscriptionStatus === 'active') {
+        // Check if subscription has expired - convert expiryTime from seconds to milliseconds if needed
+        const expiryTimeMs = sub.expiryTime ? (sub.expiryTime > 1000000000000 ? sub.expiryTime : sub.expiryTime * 1000) : null;
+        
+        if (expiryTimeMs && expiryTimeMs < now && sub.subscriptionStatus === 'active') {
           return { ...sub, subscriptionStatus: 'expired' as const };
         }
         return sub;

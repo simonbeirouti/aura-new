@@ -80,6 +80,8 @@ pub fn run() {
             iap_database::save_token_transaction,
             iap_database::get_user_token_balance,
             iap_database::get_user_subscriptions,
+            iap_database::check_transaction_exists,
+            iap_database::update_subscription_data,
             iap_database::update_subscription_status
         ])
         .run(tauri::generate_context!())

@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
-import { getUserTokenBalance, getUserSubscriptions, type UserSubscriptionRecord } from '$lib/utils/iapDatabase';
+import { getUserTokenBalance, getUserSubscriptionsWithSync, syncSubscriptionsWithIAP, type UserSubscriptionRecord } from '$lib/utils/iapDatabase';
+import { iapStore } from './iapStore';
 
 export interface UserTokenBalance {
   total_tokens: number;
@@ -106,7 +107,7 @@ function createUserStore() {
   }
 
   /**
-   * Refresh subscriptions from database
+   * Refresh subscriptions from database with automatic IAP sync
    */
   async function refreshSubscriptions(force = false): Promise<void> {
     const currentState = get({ subscribe });
@@ -124,7 +125,8 @@ function createUserStore() {
     update(state => ({ ...state, subscriptionLoading: true, subscriptionError: null }));
 
     try {
-      const subscriptions = await getUserSubscriptions(currentState.userId);
+      // Use the sync version that automatically checks IAP status
+      const subscriptions = await getUserSubscriptionsWithSync(currentState.userId);
       
       update(state => ({
         ...state,
@@ -215,26 +217,97 @@ function createUserStore() {
   }
 
   /**
-   * Start periodic subscription status checking
+   * Start periodic subscription status checking with IAP sync
    */
   function startPeriodicChecks(): void {
     if (!browser) return;
     
-    // Check subscriptions every 30 minutes
+    // Check subscriptions every 5 minutes with automatic IAP sync
     const subscriptionInterval = setInterval(() => {
       refreshSubscriptions(true);
-    }, 30 * 60 * 1000);
+    }, 5 * 60 * 1000); // Reduced from 30 to 5 minutes for better sync
 
     // Check tokens every 10 minutes (in case of external changes)
     const tokenInterval = setInterval(() => {
       refreshTokenBalance(true);
     }, 10 * 60 * 1000);
+    
+    // Dedicated IAP sync check every 2 minutes
+    const iapSyncInterval = setInterval(async () => {
+      const currentState = get({ subscribe });
+      if (currentState.userId) {
+        try {
+          const result = await syncSubscriptionsWithIAP(currentState.userId);
+          if (result.updated > 0) {
+            console.log(`🔄 Background sync updated ${result.updated} subscriptions`);
+            // Refresh subscriptions after sync updates
+            await refreshSubscriptions(true);
+          }
+        } catch (error) {
+          console.error('Background IAP sync failed:', error);
+        }
+      }
+    }, 2 * 60 * 1000); // Every 2 minutes
+
+    // Fast 30-second IAP sync for testing
+    const fastIapSyncInterval = setInterval(async () => {
+      const currentState = get({ subscribe });
+      console.log('🔄 30s IAP sync check triggered...', {
+        hasUserId: !!currentState.userId,
+        userId: currentState.userId,
+        timestamp: new Date().toISOString()
+      });
+      
+      if (currentState.userId) {
+        try {
+          console.log('📱 Starting IAP restore purchases...');
+          
+          // Restore purchases to get latest subscription status from Apple
+          await iapStore.restorePurchases("subs");
+          console.log('✅ IAP restore purchases completed');
+          
+          // Get IAP state for debugging
+          const iapState = get(iapStore);
+          console.log('📊 IAP State after restore:', {
+            activeSubscriptions: iapState.activeSubscriptions.length,
+            purchases: iapState.purchases.length,
+            isInitialized: iapState.isInitialized
+          });
+          
+          // Sync IAP status changes to database
+          console.log('🔄 Starting database sync...');
+          const syncResult = await syncSubscriptionsWithIAP(currentState.userId);
+          console.log('📈 Sync result:', syncResult);
+          
+          if (syncResult.updated > 0) {
+            console.log(`✅ Updated ${syncResult.updated} subscription(s) in database`);
+            
+            // Refresh user store to reflect database changes
+            console.log('🔄 Refreshing user store subscriptions...');
+            await refreshSubscriptions(true);
+            console.log('✅ User store refresh completed');
+          } else {
+            console.log('ℹ️ No subscription updates needed');
+          }
+          
+          if (syncResult.errors.length > 0) {
+            console.error('⚠️ Sync errors:', syncResult.errors);
+          }
+        } catch (error) {
+          console.error('❌ 30s sync check failed:', error);
+        }
+      } else {
+        console.warn('⚠️ No user ID available for sync');
+      }
+    }, 30000); // 30 seconds
 
     // Store intervals for cleanup
     if (browser && typeof window !== 'undefined') {
       (window as any).__userStoreIntervals = {
         subscription: subscriptionInterval,
-        token: tokenInterval
+        token: tokenInterval,
+        iapSync: iapSyncInterval,
+        fastIapSync: fastIapSyncInterval
       };
     }
   }
@@ -246,6 +319,8 @@ function createUserStore() {
     if (browser && typeof window !== 'undefined' && (window as any).__userStoreIntervals) {
       clearInterval((window as any).__userStoreIntervals.subscription);
       clearInterval((window as any).__userStoreIntervals.token);
+      clearInterval((window as any).__userStoreIntervals.iapSync);
+      clearInterval((window as any).__userStoreIntervals.fastIapSync);
       delete (window as any).__userStoreIntervals;
     }
   }
@@ -316,8 +391,14 @@ export const userDataErrors = derived(
 if (browser) {
   userStore.subscribe((state) => {
     if (state.isInitialized && state.userId) {
+      console.log('🚀 UserStore initialized, starting periodic checks...', {
+        userId: state.userId,
+        timestamp: new Date().toISOString()
+      });
+      
       // Start periodic checks after initialization
       setTimeout(() => {
+        console.log('⏰ Starting periodic checks now...');
         userStore.startPeriodicChecks();
       }, 1000);
     }

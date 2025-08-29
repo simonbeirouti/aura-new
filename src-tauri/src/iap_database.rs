@@ -128,7 +128,7 @@ pub async fn save_iap_transaction(
     Ok(transaction_id.to_string())
 }
 
-/// Save user subscription to database
+/// Save user subscription to database using upsert
 #[command]
 pub async fn save_user_subscription(
     subscription: UserSubscriptionRecord,
@@ -137,24 +137,25 @@ pub async fn save_user_subscription(
     let db_config = get_db_config(&app).await?;
     let client = reqwest::Client::new();
     
-    let url = format!("{}/rest/v1/user_subscriptions", db_config.database_url);
+    // Use the upsert function instead of direct insert
+    let url = format!("{}/rest/v1/rpc/upsert_user_subscription", db_config.database_url);
     
-    let mut subscription_data = HashMap::new();
-    subscription_data.insert("user_id", serde_json::json!(subscription.user_id));
-    subscription_data.insert("transaction_id", serde_json::json!(subscription.transaction_id));
-    subscription_data.insert("product_id", serde_json::json!(subscription.product_id));
-    subscription_data.insert("subscription_status", serde_json::json!(subscription.subscription_status));
-    subscription_data.insert("start_date", serde_json::json!(subscription.start_date));
-    subscription_data.insert("is_auto_renewing", serde_json::json!(subscription.is_auto_renewing));
+    let mut function_params = HashMap::new();
+    function_params.insert("p_user_id", serde_json::json!(subscription.user_id));
+    function_params.insert("p_transaction_id", serde_json::json!(subscription.transaction_id));
+    function_params.insert("p_product_id", serde_json::json!(subscription.product_id));
+    function_params.insert("p_subscription_status", serde_json::json!(subscription.subscription_status));
+    function_params.insert("p_start_date", serde_json::json!(subscription.start_date));
+    function_params.insert("p_is_auto_renewing", serde_json::json!(subscription.is_auto_renewing));
     
     if let Some(expiry_time) = subscription.expiry_time {
-        subscription_data.insert("expiry_time", serde_json::json!(expiry_time));
+        function_params.insert("p_expiry_time", serde_json::json!(expiry_time));
     }
     if let Some(renewal_date) = subscription.renewal_date {
-        subscription_data.insert("renewal_date", serde_json::json!(renewal_date));
+        function_params.insert("p_renewal_date", serde_json::json!(renewal_date));
     }
     if let Some(cancellation_date) = subscription.cancellation_date {
-        subscription_data.insert("cancellation_date", serde_json::json!(cancellation_date));
+        function_params.insert("p_cancellation_date", serde_json::json!(cancellation_date));
     }
     
     let response = client
@@ -162,14 +163,14 @@ pub async fn save_user_subscription(
         .header("Authorization", format!("Bearer {}", db_config.access_token))
         .header("apikey", &db_config.anon_key)
         .header("Content-Type", "application/json")
-        .json(&subscription_data)
+        .json(&function_params)
         .send()
         .await
-        .map_err(|e| format!("Failed to save subscription: {}", e))?;
+        .map_err(|e| format!("Failed to upsert subscription: {}", e))?;
     
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(format!("Database error saving subscription: {}", error_text));
+        return Err(format!("Database error upserting subscription: {}", error_text));
     }
     
     Ok(())
@@ -335,7 +336,101 @@ pub async fn get_user_subscriptions(
     Ok(subscriptions)
 }
 
-/// Update subscription status
+/// Check if a transaction already exists in the database
+#[command]
+pub async fn check_transaction_exists(
+    user_id: String,
+    transaction_id: String,
+    purchase_token: String,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    let db_config = get_db_config(&app).await?;
+    let client = reqwest::Client::new();
+    
+    let url = format!("{}/rest/v1/iap_transactions", db_config.database_url);
+    
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", db_config.access_token))
+        .header("apikey", &db_config.anon_key)
+        .query(&[
+            ("user_id", format!("eq.{}", user_id)),
+            ("transaction_id", format!("eq.{}", transaction_id)),
+            ("purchase_token", format!("eq.{}", purchase_token)),
+            ("select", "id".to_string())
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to check transaction existence: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        
+        // For 404 or similar, transaction doesn't exist
+        if status == 404 || error_text.contains("No rows found") {
+            return Ok(false);
+        }
+        
+        return Err(format!("Database error checking transaction existence: {}", error_text));
+    }
+    
+    let transactions: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse transaction check response: {}", e))?;
+    
+    // If we found any matching transactions, it exists
+    Ok(!transactions.is_empty())
+}
+
+/// Update subscription data (comprehensive update)
+#[command]
+pub async fn update_subscription_data(
+    subscription_id: String,
+    status: String,
+    expiry_time: Option<String>,
+    renewal_date: Option<String>,
+    is_auto_renewing: bool,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let db_config = get_db_config(&app).await?;
+    let client = reqwest::Client::new();
+    
+    let url = format!("{}/rest/v1/user_subscriptions", db_config.database_url);
+    
+    let mut update_data = HashMap::new();
+    update_data.insert("subscription_status", serde_json::json!(status));
+    update_data.insert("is_auto_renewing", serde_json::json!(is_auto_renewing));
+    update_data.insert("updated_at", serde_json::json!(chrono::Utc::now().to_rfc3339()));
+    
+    if let Some(expiry_time) = expiry_time {
+        update_data.insert("expiry_time", serde_json::json!(expiry_time));
+    }
+    if let Some(renewal_date) = renewal_date {
+        update_data.insert("renewal_date", serde_json::json!(renewal_date));
+    }
+    
+    let response = client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {}", db_config.access_token))
+        .header("apikey", &db_config.anon_key)
+        .header("Content-Type", "application/json")
+        .query(&[("id", format!("eq.{}", subscription_id))])
+        .json(&update_data)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update subscription data: {}", e))?;
+    
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("Database error updating subscription data: {}", error_text));
+    }
+    
+    Ok(())
+}
+
+/// Update subscription status (legacy function for backward compatibility)
 #[command]
 pub async fn update_subscription_status(
     subscription_id: String,

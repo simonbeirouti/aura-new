@@ -53,7 +53,7 @@ CREATE TABLE user_subscriptions (
   updated_at TIMESTAMPTZ DEFAULT NOW(),
   
   -- Only one active subscription per product per user
-  UNIQUE(user_id, product_id) DEFERRABLE INITIALLY DEFERRED
+  UNIQUE(user_id, product_id)
 );
 
 -- Tracks user token/points balance from consumable purchases
@@ -201,5 +201,58 @@ BEGIN
   VALUES (NEW.id, 0, 0);
   
   RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function to upsert subscription (for IAP sync)
+CREATE OR REPLACE FUNCTION upsert_user_subscription(
+  p_user_id UUID,
+  p_transaction_id UUID,
+  p_product_id TEXT,
+  p_subscription_status TEXT,
+  p_start_date TIMESTAMPTZ,
+  p_expiry_time TIMESTAMPTZ DEFAULT NULL,
+  p_renewal_date TIMESTAMPTZ DEFAULT NULL,
+  p_cancellation_date TIMESTAMPTZ DEFAULT NULL,
+  p_is_auto_renewing BOOLEAN DEFAULT false
+)
+RETURNS UUID AS $$
+DECLARE
+  subscription_id UUID;
+BEGIN
+  INSERT INTO user_subscriptions (
+    user_id,
+    transaction_id,
+    product_id,
+    subscription_status,
+    start_date,
+    expiry_time,
+    renewal_date,
+    cancellation_date,
+    is_auto_renewing
+  )
+  VALUES (
+    p_user_id,
+    p_transaction_id,
+    p_product_id,
+    p_subscription_status,
+    p_start_date,
+    p_expiry_time,
+    p_renewal_date,
+    p_cancellation_date,
+    p_is_auto_renewing
+  )
+  ON CONFLICT (user_id, product_id) DO UPDATE SET
+    transaction_id = EXCLUDED.transaction_id,
+    subscription_status = EXCLUDED.subscription_status,
+    start_date = EXCLUDED.start_date,
+    expiry_time = EXCLUDED.expiry_time,
+    renewal_date = EXCLUDED.renewal_date,
+    cancellation_date = EXCLUDED.cancellation_date,
+    is_auto_renewing = EXCLUDED.is_auto_renewing,
+    updated_at = NOW()
+  RETURNING id INTO subscription_id;
+  
+  RETURN subscription_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

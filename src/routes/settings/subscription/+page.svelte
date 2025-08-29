@@ -4,8 +4,7 @@
     import AppLayout from "$lib/components/AppLayout.svelte";
     import {
         iapStore,
-        iapProductConfig,
-        activeSubscriptions,
+        iapProductConfig
     } from "$lib/stores/iapStore";
     import {
         Card,
@@ -23,8 +22,8 @@
     } from "$lib/components/ui/tabs";
     import { CalendarIcon, CrownIcon } from "lucide-svelte";
     import { toast } from "svelte-sonner";
-    import { processSuccessfulPurchase } from "$lib/utils/iapDatabase";
-    import { userStore } from "$lib/stores/userStore";
+    import { processSuccessfulPurchase, syncSubscriptionsWithIAP } from "$lib/utils/iapDatabase";
+    import { userStore, activeSubscriptions as dbActiveSubscriptions } from "$lib/stores/userStore";
     import { authStore } from "$lib/stores/unifiedAuth";
 
 
@@ -34,11 +33,29 @@
     // Subscribe to IAP store - same as IAPTester
     $: state = $iapStore;
     
-    // Only show loading if no subscriptions are configured at all
-    $: loading = subscriptions.length === 0;
+    // Loading state - show spinner only when data is stale or not initialized
+    $: loading = (!initialized || initialSyncInProgress) && !hasCachedData;
     let initialized = false;
+    let initialSyncInProgress = false;
+    
+    // Check if we have cached subscription data that's still valid
+    $: hasCachedData = $userStore.isInitialized && 
+        $userStore.lastSubscriptionUpdate && 
+        (Date.now() - $userStore.lastSubscriptionUpdate) < $userStore.cacheValidDuration;
     $: subscriptions = iapProductConfig.subscriptions;
-    $: hasActiveSubscription = $activeSubscriptions.length > 0;
+    
+    // Database controls the view - only use database subscriptions for UI state
+    // But don't show as subscribed if a purchase is currently in progress
+    $: dbSubscriptions = $dbActiveSubscriptions.filter(sub => sub.subscription_status === 'active');
+    $: hasActiveSubscription = dbSubscriptions.length > 0 && !purchasingProduct;
+    
+    // Format database subscriptions for display
+    $: combinedActiveSubscriptions = dbSubscriptions.map(sub => ({
+        productId: sub.product_id,
+        subscriptionStatus: sub.subscription_status,
+        expiryTime: sub.expiry_time ? new Date(sub.expiry_time).getTime() / 1000 : undefined
+    }));
+    
 
     // Separate monthly and yearly plans
     $: monthlyPlans = subscriptions.filter((sub) => sub.id.includes("monthly"));
@@ -68,31 +85,63 @@
         };
     }
 
-    onMount(() => {
-        // Initialize IAP in background - don't block UI
-        (async () => {
-            try {
-                // Skip if already initialized with products
-                if (state.isInitialized && state.products.length > 0) {
-                    initialized = true;
-                    return;
-                }
 
-                const result = await iapStore.initialize();
-                if (result) {
-                    iapStore.setupPurchaseListener();
-                    // Only restore if no purchases exist
-                    if (state.purchases.length === 0) {
+    onMount(async () => {
+        const authState = await authStore.getState();
+        
+        if (!authState.user?.id) {
+            initialized = true;
+            return;
+        }
+        
+        // Initialize user store if not already done
+        if (!$userStore.isInitialized) {
+            initialSyncInProgress = true;
+            await userStore.initialize(authState.user.id);
+        }
+        
+        // Check if we have valid cached data
+        const now = Date.now();
+        const hasValidCache = $userStore.lastSubscriptionUpdate && 
+            (now - $userStore.lastSubscriptionUpdate) < $userStore.cacheValidDuration;
+        
+        if (!hasValidCache) {
+            // Only show loading and sync if cache is stale
+            initialSyncInProgress = true;
+            
+            try {
+                // Initialize IAP store first to ensure we have current data
+                if (!state.isInitialized || state.products.length === 0) {
+                    const iapResult = await iapStore.initialize();
+                    if (iapResult) {
+                        iapStore.setupPurchaseListener();
                         await iapStore.restorePurchases("subs");
                     }
                 }
+                
+                // Force sync to ensure database matches IAP state
+                const syncResult = await syncSubscriptionsWithIAP(authState.user.id);
+                
+                // Refresh subscriptions after sync
+                await userStore.refreshSubscriptions(true);
             } catch (error) {
-                console.error('IAP initialization failed:', error);
+                // Sync failed - continue silently but still show UI
             } finally {
-                initialized = true;
+                initialSyncInProgress = false;
             }
-        })();
+        } else {
+            // We have valid cached data, just ensure IAP store is set up for purchases
+            if (!state.isInitialized || state.products.length === 0) {
+                // Initialize IAP in background without blocking UI
+                iapStore.initialize().then(() => {
+                    iapStore.setupPurchaseListener();
+                }).catch(() => {});
+            }
+        }
+        
+        initialized = true;
     });
+
 
     onDestroy(() => {
         iapStore.cleanupPurchaseListener();
@@ -144,14 +193,20 @@
                                 "subscription"
                             );
                             
+                            // Wait for IAP process to fully complete before updating UI
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            
                             // Update user store with new subscription data
                             await userStore.updateSubscriptions();
+                            
+                            // Refresh subscriptions to get latest state
+                            await userStore.refreshSubscriptions(true);
                         } catch (dbError) {
-                            console.error("Failed to save subscription to database:", dbError);
-                            // Still show success to user since IAP completed
+                            // Failed to save subscription to database - still show success since IAP completed
                         }
                     }
                     
+                    // Only show success after all processing is complete
                     toast.success("✅ Subscription completed successfully!");
                 } else {
                     toast.error("❌ Subscription failed or was cancelled");
@@ -160,7 +215,6 @@
                 toast.error("❌ Subscription was cancelled or failed");
             }
         } catch (error) {
-            console.error("Subscription error:", error);
             toast.error(`❌ Subscription error: ${error instanceof Error ? error.message : 'Unknown error'}`);
         } finally {
             purchasingProduct = "";
@@ -185,6 +239,7 @@
             ></div>
         </div>
     {:else}
+
         <!-- Active Subscription Status -->
         {#if hasActiveSubscription}
             <Card class="mb-8">
@@ -196,7 +251,7 @@
                 </CardHeader>
                 <CardContent>
                     <div class="space-y-4">
-                        {#each $activeSubscriptions as subscription}
+                        {#each combinedActiveSubscriptions as subscription}
                             <div
                                 class="p-4 bg-primary/10 border border-primary/20 rounded-lg"
                             >
