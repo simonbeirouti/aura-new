@@ -151,7 +151,7 @@
                 
                 // Refresh token balance
                 await userStore.refreshTokenBalance(true);
-                toast.success("✅ Tokens added successfully!");
+                // Success toast already shown by IAP completion - don't show duplicate
               }
             }
           } catch (error) {

@@ -27,6 +27,7 @@
   // Use product configuration from store - same as IAPTester
   $: tokenPackages = iapProductConfig.consumables;
 
+
   // Cache for stable pricing display (prevents flashing)
   let pricingCache: Record<string, {title: string, price: string, currency: string}> = {};
   
@@ -99,85 +100,21 @@
     if (purchasingProduct) return;
     purchasingProduct = productId;
 
-    const initialPurchaseCount = $iapStore.purchases.length;
-    const initialTransactionCount = $iapStore.transactions.length;
-
     try {
+      // Initiate purchase - the IAP listener will handle completion automatically
       await iapStore.purchaseProduct(productId, "inapp");
-
-      // Wait a moment for purchase to be processed
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Check if purchase actually completed by looking at store state
-      const currentState = $iapStore;
-      const purchaseAdded =
-        currentState.purchases.length > initialPurchaseCount;
-      const transactionAdded =
-        currentState.transactions.length > initialTransactionCount;
-      const recentTransaction =
-        currentState.transactions[currentState.transactions.length - 1];
-
-      if (purchaseAdded || transactionAdded) {
-        // Verify the transaction is for this product and successful
-        if (
-          recentTransaction &&
-          recentTransaction.productId === productId &&
-          recentTransaction.status === "purchased"
-        ) {
-          // Save successful in-app purchase to database
-          const recentPurchase = currentState.purchases[currentState.purchases.length - 1];
-          if (recentPurchase) {
-            try {
-              // Get user ID from auth context
-              const authState = await authStore.getState();
-              if (!authState.user?.id) {
-                throw new Error('No authenticated user found');
-              }
-              
-              // Check if this transaction already exists in database to prevent duplicates
-              const exists = await checkTransactionExists(
-                authState.user.id,
-                recentTransaction.transactionId,
-                recentPurchase.purchaseToken
-              );
-              
-              if (!exists) {
-                // Get store product for localized pricing
-                const storeProduct = state.products.find((p) => p.productId === recentPurchase.productId);
-                
-                await processSuccessfulPurchase(
-                  authState.user.id,
-                  recentPurchase,
-                  recentTransaction,
-                  "consumable",
-                  storeProduct
-                );
-                
-                // Update user store with new token balance
-                await userStore.updateTokenBalance();
-              } else {
-                console.log('🔄 Purchase already exists in database, skipping save');
-              }
-            } catch (dbError) {
-              console.error("Failed to save token purchase to database:", dbError);
-              // Still show success to user since IAP completed
-            }
-          }
-          
-          toast.success("✅ Purchase completed successfully!");
-        } else {
-          toast.error("❌ Purchase failed or was cancelled");
-        }
-      } else {
-        toast.error("❌ Purchase was cancelled or failed");
-      }
+      
+      // Show immediate feedback and let IAP listener handle the rest
+      toast.success("✅ Purchase completed successfully!");
+      
     } catch (error) {
-      console.error("Purchase error:", error);
       toast.error(`❌ Purchase error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
+      // Reset button state
       purchasingProduct = "";
     }
   }
+
 </script>
 
 <AppLayout
@@ -186,6 +123,7 @@
   onBack={goBack}
   maxWidth="max-w-4xl"
 >
+
   {#if loading}
     <div class="flex justify-center items-center py-12">
       <div

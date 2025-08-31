@@ -4,7 +4,7 @@ import { iapProductConfig, iapStore } from '$lib/stores/iapStore';
 import { get } from 'svelte/store';
 
 export interface IAPTransactionRecord {
-  id?: string;
+  id: string;
   user_id: string;
   transaction_id: string;
   product_id: string;
@@ -12,13 +12,11 @@ export interface IAPTransactionRecord {
   purchase_token: string;
   order_id?: string;
   package_name?: string;
-  purchase_time: string; // ISO timestamp
+  purchase_time: string;
   purchase_state: number;
   signature?: string;
   original_json?: any;
   is_acknowledged: boolean;
-  formatted_price?: string; // Store localized price (e.g., "$249.99")
-  price_currency_code?: string; // Store currency code (e.g., "AUD")
 }
 
 export interface UserSubscriptionRecord {
@@ -56,7 +54,7 @@ export async function saveIAPTransaction(
   storeProduct?: any // Optional store product with localized pricing
 ): Promise<string> {
   try {
-    const transactionRecord: IAPTransactionRecord = {
+    const transactionData: Omit<IAPTransactionRecord, 'id'> = {
       user_id: userId,
       transaction_id: transaction.transactionId,
       product_id: purchase.productId,
@@ -68,12 +66,10 @@ export async function saveIAPTransaction(
       purchase_state: purchase.purchaseState,
       signature: purchase.signature,
       original_json: purchase.originalJson ? JSON.parse(purchase.originalJson) : null,
-      is_acknowledged: purchase.isAcknowledged || false,
-      formatted_price: storeProduct?.formattedPrice,
-      price_currency_code: storeProduct?.priceCurrencyCode
+      is_acknowledged: purchase.isAcknowledged || false
     };
 
-    const result = await invoke('save_iap_transaction', { transaction: transactionRecord });
+    const result = await invoke('save_iap_transaction', { transaction: transactionData });
     return result as string; // Returns the transaction ID
   } catch (error) {
     throw error;

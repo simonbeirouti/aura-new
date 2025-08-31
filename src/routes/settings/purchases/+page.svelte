@@ -7,13 +7,9 @@
     import { getUserIAPTransactions, type IAPTransactionRecord } from "$lib/utils/iapDatabase";
     import { Card, CardContent } from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
-    import { toast } from "svelte-sonner";
     import { CreditCardIcon } from "lucide-svelte";
     import { browser } from '$app/environment';
-
-    // Cache key for purchases data
-    const PURCHASES_CACHE_KEY = 'user_purchases_cache';
-    const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+    import { cacheManager, cacheKeys } from "$lib/stores/cacheManager";
     
     let purchases: IAPTransactionRecord[] = [];
     let loading = true;
@@ -35,48 +31,27 @@
     
     // Load cached data immediately on component initialization
     if (browser) {
-        const cached = getCachedPurchases();
-        if (cached && cached.length > 0) {
-            purchases = cached;
-            computeDisplayData(cached);
-            isInitialized = true;
-        }
+        // Use async pattern for auth state
+        centralizedAuth.getState().then(authState => {
+            if (authState?.user?.id) {
+                const cached = cacheManager.get<IAPTransactionRecord[]>(cacheKeys.userPurchases(authState.user.id));
+                if (cached && cached.length > 0) {
+                    purchases = cached;
+                    computeDisplayData(cached);
+                    isInitialized = true;
+                }
+            }
+        }).catch(console.warn);
     }
     
     // Show content immediately if we have cached data or after first load
     $: showContent = isInitialized && (purchases.length > 0 || error === null);
 
-    function getCachedPurchases(): IAPTransactionRecord[] | null {
-        if (!browser) return null;
-        
-        try {
-            const cached = localStorage.getItem(PURCHASES_CACHE_KEY);
-            if (!cached) return null;
-            
-            const { data, timestamp } = JSON.parse(cached);
-            const now = Date.now();
-            
-            // Return cached data if still valid
-            if (now - timestamp < CACHE_DURATION) {
-                return data;
-            }
-            
-            // Clear expired cache
-            localStorage.removeItem(PURCHASES_CACHE_KEY);
-            return null;
-        } catch {
-            return null;
-        }
-    }
-    
-    function setCachedPurchases(data: IAPTransactionRecord[]) {
+    function setCachedPurchases(data: IAPTransactionRecord[], userId: string) {
         if (!browser) return;
         
         try {
-            localStorage.setItem(PURCHASES_CACHE_KEY, JSON.stringify({
-                data,
-                timestamp: Date.now()
-            }));
+            cacheManager.set(cacheKeys.userPurchases(userId), data);
         } catch {
             // Ignore cache errors
         }
@@ -108,24 +83,36 @@
         let total = 0;
         let currency = "USD";
         
-        // Detect currency from stored purchase data first
+        // Detect currency from original_json data first
         for (const purchase of successfulPurchases) {
-            if (purchase.price_currency_code && purchase.price_currency_code !== "USD") {
-                currency = purchase.price_currency_code;
+            const originalData = purchase.original_json;
+            if (originalData?.priceCurrencyCode) {
+                currency = originalData.priceCurrencyCode;
                 break;
             }
         }
         
-        // Calculate total using stored pricing
+        // Calculate total using original_json pricing data
         successfulPurchases.forEach((purchase) => {
-            if (purchase.formatted_price && purchase.price_currency_code === currency) {
-                const priceMatch = purchase.formatted_price.match(/[\d,]+\.?\d*/);
+            const originalData = purchase.original_json;
+            if (originalData?.formattedPrice) {
+                // Use the currency from this purchase if we haven't detected one yet
+                if (originalData.priceCurrencyCode && currency === "USD") {
+                    currency = originalData.priceCurrencyCode;
+                }
+                
+                const priceMatch = originalData.formattedPrice.match(/[\d,]+\.?\d*/);
                 const storedPrice = priceMatch ? parseFloat(priceMatch[0].replace(/,/g, '')) : 0;
                 total += storedPrice;
             } else {
                 // Fallback to product info calculation
                 const productInfo = getProductInfo(purchase.product_id, purchase);
                 total += productInfo.priceValue || 0;
+                
+                // Update currency from product info if available
+                if (productInfo.currency && currency === "USD") {
+                    currency = productInfo.currency;
+                }
             }
         });
         
@@ -142,7 +129,12 @@
         async function loadPurchaseHistoryOptimistic() {
             try {
                 // Try to get cached data first
-                const cached = getCachedPurchases();
+                const authState = await centralizedAuth.getState();
+                if (!authState.user?.id) {
+                    throw new Error('No authenticated user found');
+                }
+                
+                const cached = cacheManager.get<IAPTransactionRecord[]>(cacheKeys.userPurchases(authState.user.id));
                 if (cached && cached.length > 0) {
                     purchases = cached;
                     computeDisplayData(cached);
@@ -152,13 +144,12 @@
                     // Load fresh data in background
                     setTimeout(async () => {
                         try {
-                            const authState = await centralizedAuth.getState();
                             if (authState.user?.id) {
                                 const freshPurchases = await getUserIAPTransactions(authState.user.id);
                                 if (freshPurchases.length > 0) {
                                     purchases = freshPurchases;
                                     computeDisplayData(freshPurchases);
-                                    setCachedPurchases(freshPurchases);
+                                    setCachedPurchases(freshPurchases, authState.user.id);
                                 }
                             }
                         } catch (error) {
@@ -170,15 +161,11 @@
                 
                 // If no cache, show loading and fetch fresh data
                 showLoading = true;
-                const authState = await centralizedAuth.getState();
-                if (!authState.user?.id) {
-                    throw new Error('No authenticated user found');
-                }
                 
                 const freshPurchases = await getUserIAPTransactions(authState.user.id);
                 purchases = freshPurchases;
                 computeDisplayData(freshPurchases);
-                setCachedPurchases(freshPurchases);
+                setCachedPurchases(freshPurchases, authState.user.id);
                 isInitialized = true;
                 
             } catch (err) {
@@ -220,7 +207,7 @@
             const freshPurchases = await getUserIAPTransactions(authState.user.id);
             purchases = freshPurchases;
             computeDisplayData(freshPurchases);
-            setCachedPurchases(freshPurchases);
+            setCachedPurchases(freshPurchases, authState.user.id);
             isInitialized = true;
         } catch (err) {
             console.error('Failed to load purchase history:', err);
@@ -232,18 +219,19 @@
     }
 
     function getProductInfo(productId: string, purchase?: IAPTransactionRecord) {
-        // First priority: Use stored pricing from the purchase record (no flashing)
-        if (purchase?.formatted_price && purchase?.price_currency_code) {
+        // First priority: Use stored pricing from original_json (no flashing)
+        const originalData = purchase?.original_json;
+        if (originalData?.formattedPrice && originalData?.priceCurrencyCode) {
             const consumable = iapProductConfig.consumables.find((p) => p.id === productId);
             const subscription = iapProductConfig.subscriptions.find((p) => p.id === productId);
             
             return {
                 name: consumable ? `${consumable.tokens} tokens` : (subscription?.name || productId),
-                price: purchase.formatted_price,
-                priceValue: parseFloat(purchase.formatted_price.replace(/[^0-9.]/g, '')) || 0,
+                price: originalData.formattedPrice,
+                priceValue: parseFloat(originalData.formattedPrice.replace(/[^0-9.]/g, '')) || 0,
                 emoji: consumable?.emoji || subscription?.emoji || "📦",
                 type: consumable ? "consumable" : (subscription ? "subscription" : "unknown"),
-                currency: purchase.price_currency_code,
+                currency: originalData.priceCurrencyCode,
             };
         }
 

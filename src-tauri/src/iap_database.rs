@@ -20,8 +20,6 @@ pub struct IAPTransactionRecord {
     pub signature: Option<String>,
     pub original_json: Option<serde_json::Value>,
     pub is_acknowledged: bool,
-    pub formatted_price: Option<String>, // Store localized price (e.g., "$249.99")
-    pub price_currency_code: Option<String>, // Store currency code (e.g., "AUD")
 }
 
 // User Subscription record matching the database schema
@@ -86,12 +84,6 @@ pub async fn save_iap_transaction(
     transaction_data.insert("purchase_state", serde_json::json!(transaction.purchase_state));
     transaction_data.insert("is_acknowledged", serde_json::json!(transaction.is_acknowledged));
     
-    if let Some(formatted_price) = transaction.formatted_price {
-        transaction_data.insert("formatted_price", serde_json::json!(formatted_price));
-    }
-    if let Some(price_currency_code) = transaction.price_currency_code {
-        transaction_data.insert("price_currency_code", serde_json::json!(price_currency_code));
-    }
     
     if let Some(order_id) = transaction.order_id {
         transaction_data.insert("order_id", serde_json::json!(order_id));
@@ -503,8 +495,6 @@ pub async fn get_user_iap_transactions(
             signature: None,
             original_json: None,
             is_acknowledged: true,
-            formatted_price: record.get("formatted_price").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            price_currency_code: record.get("price_currency_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
         })
         .collect();
     
