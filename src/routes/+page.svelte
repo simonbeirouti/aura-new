@@ -8,6 +8,7 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import AppLayout from "$lib/components/AppLayout.svelte";
+  import SubscriptionStatus from "$lib/components/SubscriptionStatus.svelte";
 
   function playBounceAnimation() {
     animate(".bounce-target", {
@@ -78,6 +79,20 @@
 </svelte:head>
 
 <AppLayout maxWidth="max-w-6xl">
+  <!-- Subscription Status -->
+  <div class="mb-6">
+    <Card class="border-border bg-card text-card-foreground shadow-sm">
+      <CardHeader>
+        <CardTitle class="flex items-center gap-2">
+          <span>Account Status</span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <SubscriptionStatus showTokens={true} showSubscription={true} compact={false} />
+      </CardContent>
+    </Card>
+  </div>
+
   <!-- Animation Cards Grid -->
   <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
     <!-- Bounce Card -->
