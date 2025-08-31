@@ -82,7 +82,8 @@ pub fn run() {
             iap_database::get_user_subscriptions,
             iap_database::check_transaction_exists,
             iap_database::update_subscription_data,
-            iap_database::update_subscription_status
+            iap_database::update_subscription_status,
+            iap_database::get_user_iap_transactions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

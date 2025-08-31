@@ -3,6 +3,13 @@ import { browser } from '$app/environment';
 import { getUserTokenBalance, getUserSubscriptionsWithSync, syncSubscriptionsWithIAP, type UserSubscriptionRecord } from '$lib/utils/iapDatabase';
 import { iapStore } from './iapStore';
 
+/**
+ * Format a number with commas for thousands separators
+ */
+function formatNumberWithCommas(num: number): string {
+  return num.toLocaleString();
+}
+
 export interface UserTokenBalance {
   total_tokens: number;
   tokens_used: number;
@@ -239,7 +246,6 @@ function createUserStore() {
         try {
           const result = await syncSubscriptionsWithIAP(currentState.userId);
           if (result.updated > 0) {
-            console.log(`🔄 Background sync updated ${result.updated} subscriptions`);
             // Refresh subscriptions after sync updates
             await refreshSubscriptions(true);
           }
@@ -252,40 +258,18 @@ function createUserStore() {
     // Fast 30-second IAP sync for testing
     const fastIapSyncInterval = setInterval(async () => {
       const currentState = get({ subscribe });
-      console.log('🔄 30s IAP sync check triggered...', {
-        hasUserId: !!currentState.userId,
-        userId: currentState.userId,
-        timestamp: new Date().toISOString()
-      });
       
       if (currentState.userId) {
         try {
-          console.log('📱 Starting IAP restore purchases...');
-          
           // Restore purchases to get latest subscription status from Apple
           await iapStore.restorePurchases("subs");
-          console.log('✅ IAP restore purchases completed');
-          
-          // Get IAP state for debugging
-          const iapState = get(iapStore);
-          console.log('📊 IAP State after restore:', {
-            activeSubscriptions: iapState.activeSubscriptions.length,
-            purchases: iapState.purchases.length,
-            isInitialized: iapState.isInitialized
-          });
           
           // Sync IAP status changes to database
-          console.log('🔄 Starting database sync...');
           const syncResult = await syncSubscriptionsWithIAP(currentState.userId);
-          console.log('📈 Sync result:', syncResult);
           
-          if (syncResult.updated > 0) {
-            console.log(`✅ Updated ${syncResult.updated} subscription(s) in database`);
-            
+          if (syncResult.updated > 0) {            
             // Refresh user store to reflect database changes
-            console.log('🔄 Refreshing user store subscriptions...');
             await refreshSubscriptions(true);
-            console.log('✅ User store refresh completed');
           } else {
             console.log('ℹ️ No subscription updates needed');
           }
@@ -387,20 +371,39 @@ export const userDataErrors = derived(
   })
 );
 
+// Formatted token stores with comma separators
+export const formattedTokenBalance = derived(
+  userStore,
+  ($user: UserState) => ({
+    total_tokens: formatNumberWithCommas($user.tokenBalance.total_tokens),
+    tokens_used: formatNumberWithCommas($user.tokenBalance.tokens_used),
+    tokens_available: formatNumberWithCommas($user.tokenBalance.tokens_available)
+  })
+);
+
+export const formattedAvailableTokens = derived(
+  userStore,
+  ($user: UserState) => formatNumberWithCommas($user.tokenBalance.tokens_available)
+);
+
+export const formattedTotalTokens = derived(
+  userStore,
+  ($user: UserState) => formatNumberWithCommas($user.tokenBalance.total_tokens)
+);
+
+export const formattedUsedTokens = derived(
+  userStore,
+  ($user: UserState) => formatNumberWithCommas($user.tokenBalance.tokens_used)
+);
+
 // Auto-start periodic checks when store is initialized
 if (browser) {
   userStore.subscribe((state) => {
     if (state.isInitialized && state.userId) {
-      console.log('🚀 UserStore initialized, starting periodic checks...', {
-        userId: state.userId,
-        timestamp: new Date().toISOString()
-      });
-      
       // Start periodic checks after initialization
       setTimeout(() => {
-        console.log('⏰ Starting periodic checks now...');
         userStore.startPeriodicChecks();
-      }, 1000);
+      }, 10000);
     }
   });
 }

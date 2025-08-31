@@ -28,6 +28,10 @@
     $: dbSubscriptions = $dbActiveSubscriptions.filter(sub => sub.subscription_status === 'active');
     $: hasActiveSubscription = dbSubscriptions.length > 0 && !purchasingProduct;
     
+    // Show content immediately if IAP is initialized OR we have subscription data
+    $: showContent = iapState.isInitialized || dbSubscriptions.length > 0;
+    $: showLoading = !iapState.isInitialized && dbSubscriptions.length === 0;
+    
     // Format database subscriptions for display
     $: combinedActiveSubscriptions = dbSubscriptions.map(sub => ({
         productId: sub.product_id,
@@ -39,28 +43,38 @@
     $: monthlyPlans = subscriptions.filter((sub) => sub.id.includes("monthly"));
     $: yearlyPlans = subscriptions.filter((sub) => sub.id.includes("yearly"));
 
-    // Helper to get product display info
+    // Helper to get product display info - prioritize localized store pricing
     function getProductInfo(productId: string) {
         const storeProduct = iapState.products.find(
             (p) => p.productId === productId,
         );
-        if (storeProduct) {
+        
+        // Always prefer store product data when available (has localized pricing)
+        if (storeProduct && storeProduct.formattedPrice) {
             return {
-                title: storeProduct.title,
+                title: storeProduct.title || getConfigTitle(productId),
                 price: storeProduct.formattedPrice,
-                currency: storeProduct.priceCurrencyCode,
+                currency: storeProduct.priceCurrencyCode || "USD",
             };
         }
 
-        // Fallback to config data if product not loaded
+        // Fallback to config data only if store product not available or incomplete
         const subData = iapProductConfig.subscriptions.find(
             (p) => p.id === productId,
         );
         return {
             title: subData?.name || productId,
-            price: subData?.price || "Unknown",
-            currency: "USD",
+            price: subData?.price || "Loading...",
+            currency: "USD", // Will be replaced once store loads
         };
+    }
+
+    // Helper to get config title for store products
+    function getConfigTitle(productId: string): string {
+        const subData = iapProductConfig.subscriptions.find(
+            (p) => p.id === productId,
+        );
+        return subData?.name || productId;
     }
 
     async function handlePurchase(productId: string) {
@@ -89,13 +103,15 @@
     onBack={goBack}
     maxWidth="max-w-3xl"
 >
-    {#if !iapState.isInitialized}
+    {#if showLoading}
         <div class="flex justify-center items-center py-12">
             <div
                 class="w-8 h-8 border-4 border-primary/20 border-t-primary rounded-full animate-spin"
             ></div>
         </div>
-    {:else}
+    {/if}
+    
+    {#if showContent}
 
         <!-- Active Subscription Status -->
         {#if hasActiveSubscription}

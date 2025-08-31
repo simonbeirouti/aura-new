@@ -196,9 +196,7 @@
         return;
       }
       
-      console.log('🔄 Refreshing profile for:', userId);
       await settingsActions.loadProfile(true);
-      console.log('✅ Profile refreshed');
     } catch (error) {
       databaseError = error instanceof Error ? error.message : 'Profile refresh failed';
       console.error('❌ Profile refresh failed:', error);
@@ -214,9 +212,7 @@
         return;
       }
       
-      console.log('🔄 Testing data store operations for:', userId);
       const profile = await dataActions.getUserProfile(userId);
-      console.log('✅ Data store returned profile:', profile);
       databaseProfile = { dataStoreResult: profile }; // Show in UI
     } catch (error) {
       databaseError = error instanceof Error ? error.message : 'Data store test failed';
@@ -227,9 +223,7 @@
   async function debugDatabaseSchema() {
     try {
       databaseError = null;
-      console.log('🔄 Checking database status...');
       const result = await invoke('get_database_status');
-      console.log('✅ Database status check result:', result);
       databaseProfile = { statusCheck: result }; // Show in UI
     } catch (error) {
       databaseError = error instanceof Error ? error.message : 'Database status check failed';
@@ -240,10 +234,8 @@
   async function initializeStores() {
     try {
       databaseError = null;
-      console.log('🔄 Initializing all stores...');
       await dataActions.initialize();
       await settingsActions.initialize();
-      console.log('✅ Store initialization completed');
       databaseProfile = { storeInit: 'completed' }; // Show in UI
     } catch (error) {
       databaseError = error instanceof Error ? error.message : 'Store initialization failed';

@@ -10,7 +10,7 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
-  import { processSuccessfulPurchase } from "$lib/utils/iapDatabase";
+  import { processSuccessfulPurchase, checkTransactionExists } from "$lib/utils/iapDatabase";
   import { userStore } from "$lib/stores/userStore";
   import { authStore } from "$lib/stores/unifiedAuth";
 
@@ -27,24 +27,36 @@
   // Use product configuration from store - same as IAPTester
   $: tokenPackages = iapProductConfig.consumables;
 
-  // Helper to get product display info - same as IAPTester
+  // Cache for stable pricing display (prevents flashing)
+  let pricingCache: Record<string, {title: string, price: string, currency: string}> = {};
+  
+  // Helper to get product display info with stable pricing
   function getProductInfo(productId: string) {
     const storeProduct = state.products.find((p) => p.productId === productId);
-    if (storeProduct) {
-      return {
-        title: storeProduct.title,
+    const tokenData = iapProductConfig.consumables.find((p) => p.id === productId);
+    
+    // If we have store product data, cache it and use it
+    if (storeProduct && storeProduct.formattedPrice) {
+      const productInfo = {
+        title: tokenData?.tokens || storeProduct.title || productId,
         price: storeProduct.formattedPrice,
-        currency: storeProduct.priceCurrencyCode,
+        currency: storeProduct.priceCurrencyCode || "USD",
       };
+      
+      // Cache this pricing to prevent future flashing
+      pricingCache[productId] = productInfo;
+      return productInfo;
     }
 
-    // Fallback to config data if product not loaded
-    const tokenData = iapProductConfig.consumables.find(
-      (p) => p.id === productId,
-    );
+    // If we have cached pricing from previous load, use it (prevents flashing)
+    if (pricingCache[productId]) {
+      return pricingCache[productId];
+    }
+
+    // Only show config fallback if we have no cached data
     return {
       title: tokenData?.tokens || productId,
-      price: tokenData?.price || "Unknown",
+      price: tokenData?.price || "Loading...",
       currency: "USD",
     };
   }
@@ -122,15 +134,30 @@
                 throw new Error('No authenticated user found');
               }
               
-              await processSuccessfulPurchase(
+              // Check if this transaction already exists in database to prevent duplicates
+              const exists = await checkTransactionExists(
                 authState.user.id,
-                recentPurchase,
-                recentTransaction,
-                "consumable"
+                recentTransaction.transactionId,
+                recentPurchase.purchaseToken
               );
               
-              // Update user store with new token balance
-              await userStore.updateTokenBalance();
+              if (!exists) {
+                // Get store product for localized pricing
+                const storeProduct = state.products.find((p) => p.productId === recentPurchase.productId);
+                
+                await processSuccessfulPurchase(
+                  authState.user.id,
+                  recentPurchase,
+                  recentTransaction,
+                  "consumable",
+                  storeProduct
+                );
+                
+                // Update user store with new token balance
+                await userStore.updateTokenBalance();
+              } else {
+                console.log('🔄 Purchase already exists in database, skipping save');
+              }
             } catch (dbError) {
               console.error("Failed to save token purchase to database:", dbError);
               // Still show success to user since IAP completed

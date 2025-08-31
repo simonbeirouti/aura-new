@@ -33,7 +33,7 @@ CREATE TABLE iap_transactions (
 CREATE TABLE user_subscriptions (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE NOT NULL,
-  transaction_id UUID REFERENCES iap_transactions(id) ON DELETE CASCADE NOT NULL,
+  iap_transaction_id UUID REFERENCES iap_transactions(id) ON DELETE CASCADE NOT NULL,
   
   -- Subscription details
   product_id TEXT NOT NULL,
@@ -207,7 +207,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- Function to upsert subscription (for IAP sync)
 CREATE OR REPLACE FUNCTION upsert_user_subscription(
   p_user_id UUID,
-  p_transaction_id UUID,
+  p_iap_transaction_id UUID,
   p_product_id TEXT,
   p_subscription_status TEXT,
   p_start_date TIMESTAMPTZ,
@@ -222,7 +222,7 @@ DECLARE
 BEGIN
   INSERT INTO user_subscriptions (
     user_id,
-    transaction_id,
+    iap_transaction_id,
     product_id,
     subscription_status,
     start_date,
@@ -233,7 +233,7 @@ BEGIN
   )
   VALUES (
     p_user_id,
-    p_transaction_id,
+    p_iap_transaction_id,
     p_product_id,
     p_subscription_status,
     p_start_date,
@@ -243,7 +243,7 @@ BEGIN
     p_is_auto_renewing
   )
   ON CONFLICT (user_id, product_id) DO UPDATE SET
-    transaction_id = EXCLUDED.transaction_id,
+    iap_transaction_id = EXCLUDED.iap_transaction_id,
     subscription_status = EXCLUDED.subscription_status,
     start_date = EXCLUDED.start_date,
     expiry_time = EXCLUDED.expiry_time,

@@ -17,12 +17,14 @@ export interface IAPTransactionRecord {
   signature?: string;
   original_json?: any;
   is_acknowledged: boolean;
+  formatted_price?: string; // Store localized price (e.g., "$249.99")
+  price_currency_code?: string; // Store currency code (e.g., "AUD")
 }
 
 export interface UserSubscriptionRecord {
   id?: string;
   user_id: string;
-  transaction_id: string;
+  iap_transaction_id: string;
   product_id: string;
   subscription_status: 'active' | 'expired' | 'cancelled' | 'pending';
   start_date: string; // ISO timestamp
@@ -44,13 +46,14 @@ export interface TokenTransactionRecord {
 }
 
 /**
- * Save IAP transaction to database
+ * Save IAP transaction to database with localized pricing
  */
 export async function saveIAPTransaction(
   userId: string,
   purchase: Purchase,
   transaction: Transaction,
-  productType: 'subscription' | 'consumable'
+  productType: 'subscription' | 'consumable',
+  storeProduct?: any // Optional store product with localized pricing
 ): Promise<string> {
   try {
     const transactionRecord: IAPTransactionRecord = {
@@ -65,7 +68,9 @@ export async function saveIAPTransaction(
       purchase_state: purchase.purchaseState,
       signature: purchase.signature,
       original_json: purchase.originalJson ? JSON.parse(purchase.originalJson) : null,
-      is_acknowledged: purchase.isAcknowledged || false
+      is_acknowledged: purchase.isAcknowledged || false,
+      formatted_price: storeProduct?.formattedPrice,
+      price_currency_code: storeProduct?.priceCurrencyCode
     };
 
     const result = await invoke('save_iap_transaction', { transaction: transactionRecord });
@@ -117,7 +122,7 @@ export async function saveSubscription(
 
     const subscriptionRecord: UserSubscriptionRecord = {
       user_id: userId,
-      transaction_id: transactionId,
+      iap_transaction_id: transactionId,
       product_id: purchase.productId,
       subscription_status: purchase.subscriptionStatus || 'active',
       start_date: startDate.toISOString(),
@@ -180,11 +185,12 @@ export async function processSuccessfulPurchase(
   userId: string,
   purchase: Purchase,
   transaction: Transaction,
-  productType: 'subscription' | 'consumable'
+  productType: 'subscription' | 'consumable',
+  storeProduct?: any // Optional store product with localized pricing
 ): Promise<void> {
   try {
-    // Save the main IAP transaction
-    const transactionId = await saveIAPTransaction(userId, purchase, transaction, productType);
+    // Save the main IAP transaction with localized pricing
+    const transactionId = await saveIAPTransaction(userId, purchase, transaction, productType, storeProduct);
 
     if (productType === 'subscription') {
       // Save subscription record
@@ -317,14 +323,27 @@ export async function checkTransactionExists(
   purchaseToken: string
 ): Promise<boolean> {
   try {
-    const result = await invoke('check_transaction_exists', {
+    const result = await invoke<boolean>('check_transaction_exists', {
       userId,
       transactionId,
       purchaseToken
     });
-    return result as boolean;
+    return result;
   } catch (error) {
-    return false;
+    console.error('Error checking transaction existence:', error);
+    return false; // Assume doesn't exist on error to allow processing
+  }
+}
+
+export async function getUserIAPTransactions(userId: string): Promise<IAPTransactionRecord[]> {
+  try {
+    const result = await invoke<IAPTransactionRecord[]>('get_user_iap_transactions', {
+      userId
+    });
+    return result;
+  } catch (error) {
+    console.error('Error getting user IAP transactions:', error);
+    return [];
   }
 }
 

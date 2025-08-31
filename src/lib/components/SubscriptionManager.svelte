@@ -7,7 +7,7 @@
   } from "$lib/stores/iapStore";
   import { userStore } from "$lib/stores/userStore";
   import { authStore } from "$lib/stores/unifiedAuth";
-  import { processSuccessfulPurchase, syncSubscriptionsWithIAP } from "$lib/utils/iapDatabase";
+  import { processSuccessfulPurchase, syncSubscriptionsWithIAP, checkTransactionExists } from "$lib/utils/iapDatabase";
   import { toast } from "svelte-sonner";
 
   // Reactive state management
@@ -21,6 +21,9 @@
 
   let initialized = false;
   let purchaseListener: (() => void) | null = null;
+  
+  // Track processed purchases to prevent duplicate database entries
+  const processedPurchases = new Set<string>();
 
   /**
    * Initialize subscription and token management
@@ -50,17 +53,10 @@
       // Sync subscriptions if cache is stale
       if (!hasCachedSubscriptionData) {
         try {
-          console.log('🔄 SubscriptionManager: Starting initial sync for user:', authState.user.id);
-          const syncResult = await syncSubscriptionsWithIAP(authState.user.id);
-          console.log('📊 SubscriptionManager: Sync result:', syncResult);
-          
           await userStore.refreshSubscriptions(true);
-          console.log('✅ SubscriptionManager: User store refreshed');
         } catch (error) {
           console.warn('❌ SubscriptionManager: Initial subscription sync failed:', error);
         }
-      } else {
-        console.log('💾 SubscriptionManager: Using cached subscription data');
       }
 
       initialized = true;
@@ -83,15 +79,37 @@
       const unsubscribe = iapStore.subscribe(async (state) => {
         if (!authState.user?.id) return;
 
-        // Check for new purchases that need database processing
-        const recentPurchases = state.purchases.filter(purchase => 
-          purchase.purchaseState === 0 && // Successful purchase
-          purchase.purchaseTime && 
-          (Date.now() - purchase.purchaseTime) < 60000 // Within last minute
-        );
+        // Check for purchases that need database processing
+        // Process both new purchases (last minute) and restored purchases
+        const newPurchases = state.purchases.filter(purchase => {
+          const purchaseKey = `${purchase.productId}_${purchase.purchaseToken}`;
+          const isRecent = purchase.purchaseTime && (Date.now() - purchase.purchaseTime) < 60000;
+          const isRestored = state.lastPurchasesRestore && (Date.now() - state.lastPurchasesRestore) < 30000; // Within 30s of restore
+          
+          return purchase.purchaseState === 0 && // Successful purchase
+                 purchase.purchaseTime && 
+                 (isRecent || isRestored) && // Either recent purchase or from recent restore
+                 !processedPurchases.has(purchaseKey); // Not already processed
+        });
 
-        for (const purchase of recentPurchases) {
+        for (const purchase of newPurchases) {
+          const purchaseKey = `${purchase.productId}_${purchase.purchaseToken}`;
+          
           try {
+            // Mark as being processed to prevent duplicates
+            processedPurchases.add(purchaseKey);
+            
+            // Check if this transaction already exists in database
+            const exists = await checkTransactionExists(
+              authState.user.id,
+              purchase.purchaseToken, // Use purchaseToken as transactionId
+              purchase.purchaseToken
+            );
+            
+            if (exists) {
+              continue;
+            }
+
             // Find corresponding transaction
             const transaction = state.transactions.find(t => 
               t.productId === purchase.productId && 
@@ -104,24 +122,31 @@
               const isConsumable = iapProductConfig.consumables.some(c => c.id === purchase.productId);
 
               if (isSubscription) {
+                // Get store product for localized pricing
+                const storeProduct = $iapStore.products.find((p) => p.productId === purchase.productId);
+                
                 await processSuccessfulPurchase(
                   authState.user.id,
                   purchase,
                   transaction,
-                  "subscription"
+                  "subscription",
+                  storeProduct
                 );
                 
                 // Refresh subscription data
                 await userStore.refreshSubscriptions(true);
-                console.log('🎉 SubscriptionManager: Subscription purchase processed successfully');
                 toast.success("✅ Subscription activated successfully!");
                 
               } else if (isConsumable) {
+                // Get store product for localized pricing
+                const storeProduct = $iapStore.products.find((p) => p.productId === purchase.productId);
+                
                 await processSuccessfulPurchase(
                   authState.user.id,
                   purchase,
                   transaction,
-                  "consumable"
+                  "consumable",
+                  storeProduct
                 );
                 
                 // Refresh token balance
@@ -131,6 +156,8 @@
             }
           } catch (error) {
             console.error('Failed to process purchase:', error);
+            // Remove from processed set on error so it can be retried
+            processedPurchases.delete(purchaseKey);
           }
         }
       });

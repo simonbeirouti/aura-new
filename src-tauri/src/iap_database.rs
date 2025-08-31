@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::command;
-use tauri_plugin_store::StoreExt;
 
 use crate::database::{get_authenticated_db, DatabaseConfig};
 
@@ -21,6 +20,8 @@ pub struct IAPTransactionRecord {
     pub signature: Option<String>,
     pub original_json: Option<serde_json::Value>,
     pub is_acknowledged: bool,
+    pub formatted_price: Option<String>, // Store localized price (e.g., "$249.99")
+    pub price_currency_code: Option<String>, // Store currency code (e.g., "AUD")
 }
 
 // User Subscription record matching the database schema
@@ -28,7 +29,7 @@ pub struct IAPTransactionRecord {
 pub struct UserSubscriptionRecord {
     pub id: Option<String>,
     pub user_id: String,
-    pub transaction_id: String,
+    pub iap_transaction_id: String,
     pub product_id: String,
     pub subscription_status: String, // 'active' | 'expired' | 'cancelled' | 'pending'
     pub start_date: String, // ISO timestamp
@@ -84,6 +85,13 @@ pub async fn save_iap_transaction(
     transaction_data.insert("purchase_time", serde_json::json!(transaction.purchase_time));
     transaction_data.insert("purchase_state", serde_json::json!(transaction.purchase_state));
     transaction_data.insert("is_acknowledged", serde_json::json!(transaction.is_acknowledged));
+    
+    if let Some(formatted_price) = transaction.formatted_price {
+        transaction_data.insert("formatted_price", serde_json::json!(formatted_price));
+    }
+    if let Some(price_currency_code) = transaction.price_currency_code {
+        transaction_data.insert("price_currency_code", serde_json::json!(price_currency_code));
+    }
     
     if let Some(order_id) = transaction.order_id {
         transaction_data.insert("order_id", serde_json::json!(order_id));
@@ -142,7 +150,7 @@ pub async fn save_user_subscription(
     
     let mut function_params = HashMap::new();
     function_params.insert("p_user_id", serde_json::json!(subscription.user_id));
-    function_params.insert("p_transaction_id", serde_json::json!(subscription.transaction_id));
+    function_params.insert("p_iap_transaction_id", serde_json::json!(subscription.iap_transaction_id));
     function_params.insert("p_product_id", serde_json::json!(subscription.product_id));
     function_params.insert("p_subscription_status", serde_json::json!(subscription.subscription_status));
     function_params.insert("p_start_date", serde_json::json!(subscription.start_date));
@@ -322,7 +330,7 @@ pub async fn get_user_subscriptions(
         .map(|record| UserSubscriptionRecord {
             id: record.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
             user_id: record.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            transaction_id: record.get("transaction_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            iap_transaction_id: record.get("iap_transaction_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             product_id: record.get("product_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             subscription_status: record.get("subscription_status").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             start_date: record.get("start_date").and_then(|v| v.as_str()).unwrap_or("").to_string(),
@@ -428,6 +436,85 @@ pub async fn update_subscription_data(
     }
     
     Ok(())
+}
+
+/// Get user's token transactions (purchase history)
+#[command]
+pub async fn get_user_iap_transactions(
+    user_id: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<IAPTransactionRecord>, String> {
+    println!("🔍 Getting token transactions for user: {}", user_id);
+    
+    let db_config = get_db_config(&app).await?;
+    let client = reqwest::Client::new();
+    
+    let url = format!("{}/rest/v1/token_transactions", db_config.database_url);
+    println!("🔍 Query URL: {}", url);
+    
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", db_config.access_token))
+        .header("apikey", &db_config.anon_key)
+        .query(&[
+            ("user_id", format!("eq.{}", user_id)),
+            ("transaction_type", "eq.purchase".to_string()),
+            ("order", "created_at.desc".to_string()) // Most recent first
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("Failed to get IAP transactions: {}", e))?;
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        
+        println!("🚨 Database query failed - Status: {}, Error: {}", status, error_text);
+        
+        // For 404 or similar, just return empty array (new user)
+        if status == 404 || error_text.contains("No rows found") {
+            println!("📝 No transactions found for user (404/empty)");
+            return Ok(vec![]);
+        }
+        
+        return Err(format!("Database error getting IAP transactions: {}", error_text));
+    }
+    
+    let transaction_records: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse IAP transactions response: {}", e))?;
+    
+    println!("🔍 Raw database response: {} records", transaction_records.len());
+    
+    let transactions: Vec<IAPTransactionRecord> = transaction_records
+        .into_iter()
+        .map(|record| IAPTransactionRecord {
+            id: record.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            user_id: record.get("user_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            transaction_id: record.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(), // Use token transaction ID
+            product_id: record.get("product_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            product_type: "consumable".to_string(), // Token purchases are consumables
+            purchase_token: record.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(), // Use token transaction ID as token
+            order_id: None,
+            package_name: None,
+            purchase_time: record.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            purchase_state: 0, // All token transactions are successful (state 0)
+            signature: None,
+            original_json: None,
+            is_acknowledged: true,
+            formatted_price: record.get("formatted_price").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            price_currency_code: record.get("price_currency_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        })
+        .collect();
+    
+    println!("🔍 Parsed {} transactions for user", transactions.len());
+    for (i, tx) in transactions.iter().enumerate() {
+        println!("  Transaction {}: product_id={}, purchase_state={}, purchase_time={}", 
+                 i+1, tx.product_id, tx.purchase_state, tx.purchase_time);
+    }
+    
+    Ok(transactions)
 }
 
 /// Update subscription status (legacy function for backward compatibility)
