@@ -203,6 +203,26 @@ function createUserStore() {
   }
 
   /**
+   * Immediately update token balance after a purchase (optimistic update)
+   */
+  function updateTokenBalanceAfterPurchase(tokenCost: number): void {
+    update(state => {
+      const newTokensUsed = state.tokenBalance.tokens_used + tokenCost;
+      const newTokensAvailable = state.tokenBalance.total_tokens - newTokensUsed;
+      
+      return {
+        ...state,
+        tokenBalance: {
+          ...state.tokenBalance,
+          tokens_used: newTokensUsed,
+          tokens_available: newTokensAvailable
+        },
+        lastTokenUpdate: Date.now()
+      };
+    });
+  }
+
+  /**
    * Update subscriptions after a purchase or status change
    */
   async function updateSubscriptions(newSubscriptions?: UserSubscriptionRecord[]): Promise<void> {
@@ -260,34 +280,14 @@ function createUserStore() {
   function startPeriodicChecks(): void {
     if (!browser) return;
     
-    // Check subscriptions every 5 minutes with automatic IAP sync
+    // Check subscriptions and tokens every 30 minutes
     const subscriptionInterval = setInterval(() => {
       refreshSubscriptions(true);
-    }, 5 * 60 * 1000); // Reduced from 30 to 5 minutes for better sync
-
-    // Check tokens every 10 minutes (in case of external changes)
-    const tokenInterval = setInterval(() => {
       refreshTokenBalance(true);
-    }, 10 * 60 * 1000);
+    }, 30 * 60 * 1000); // Combined check every 30 minutes
     
-    // Dedicated IAP sync check every 2 minutes
+    // Comprehensive IAP sync check every 15 minutes (with reduced logging)
     const iapSyncInterval = setInterval(async () => {
-      const currentState = get({ subscribe });
-      if (currentState.userId) {
-        try {
-          const result = await syncSubscriptionsWithIAP(currentState.userId);
-          if (result.updated > 0) {
-            // Refresh subscriptions after sync updates
-            await refreshSubscriptions(true);
-          }
-        } catch (error) {
-          console.error('Background IAP sync failed:', error);
-        }
-      }
-    }, 2 * 60 * 1000); // Every 2 minutes
-
-    // Fast 30-second IAP sync for testing
-    const fastIapSyncInterval = setInterval(async () => {
       const currentState = get({ subscribe });
       
       if (currentState.userId) {
@@ -301,28 +301,23 @@ function createUserStore() {
           if (syncResult.updated > 0) {            
             // Refresh user store to reflect database changes
             await refreshSubscriptions(true);
-          } else {
-            console.log('ℹ️ No subscription updates needed');
           }
+          // Removed the "No subscription updates needed" log to reduce noise
           
           if (syncResult.errors.length > 0) {
             console.error('⚠️ Sync errors:', syncResult.errors);
           }
         } catch (error) {
-          console.error('❌ 30s sync check failed:', error);
+          console.error('❌ IAP sync check failed:', error);
         }
-      } else {
-        console.warn('⚠️ No user ID available for sync');
       }
-    }, 30000); // 30 seconds
+    }, 15 * 60 * 1000); // Every 15 minutes
 
     // Store intervals for cleanup
     if (browser && typeof window !== 'undefined') {
       (window as any).__userStoreIntervals = {
         subscription: subscriptionInterval,
-        token: tokenInterval,
-        iapSync: iapSyncInterval,
-        fastIapSync: fastIapSyncInterval
+        iapSync: iapSyncInterval
       };
     }
   }
@@ -333,9 +328,7 @@ function createUserStore() {
   function stopPeriodicChecks(): void {
     if (browser && typeof window !== 'undefined' && (window as any).__userStoreIntervals) {
       clearInterval((window as any).__userStoreIntervals.subscription);
-      clearInterval((window as any).__userStoreIntervals.token);
       clearInterval((window as any).__userStoreIntervals.iapSync);
-      clearInterval((window as any).__userStoreIntervals.fastIapSync);
       delete (window as any).__userStoreIntervals;
     }
   }
@@ -424,6 +417,7 @@ function createUserStore() {
     refreshTokenBalance,
     refreshSubscriptions,
     updateTokenBalance,
+    updateTokenBalanceAfterPurchase,
     updateSubscriptions,
     hasActiveSubscription,
     hasSufficientTokens,

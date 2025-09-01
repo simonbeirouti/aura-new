@@ -232,20 +232,6 @@ function createIAPStore() {
         lastInitialized: now
       }));
 
-      // Query products only if cache is invalid or forced
-      const shouldQueryProducts = forceRefresh || 
-        !currentState.lastProductsQuery || 
-        (now - currentState.lastProductsQuery) > currentState.cacheValidDuration ||
-        currentState.products.length === 0;
-
-      if (shouldQueryProducts) {
-        try {
-          await queryAllProductsInternal();
-        } catch (error) {
-          console.error('Auto product query failed:', error);
-        }
-      }
-
       return true;
 
     } catch (error) {
@@ -383,47 +369,6 @@ function createIAPStore() {
     }
   }
 
-  // Internal function for auto-querying after initialization
-  async function queryAllProductsInternal(): Promise<void> {
-    const now = Date.now();
-    
-    // Clear existing products to start fresh
-    update(state => ({ ...state, products: [] }));
-
-    // Strategy 1: Query consumables explicitly as 'inapp' first
-    if (iapProductIds.consumables.length > 0) {
-      await queryProducts(iapProductIds.consumables, 'inapp');
-    }
-
-    // Strategy 2: Query subscriptions with 'subs' type
-    if (iapProductIds.subscriptions.length > 0) {
-      await queryProducts(iapProductIds.subscriptions, 'subs');
-    }
-
-    // Strategy 3: Individual queries for any missing products
-    const allProductIds = [...iapProductIds.consumables, ...iapProductIds.subscriptions];
-    let currentState = get(store);
-
-    if (currentState.products.length < allProductIds.length) {
-      for (const productId of allProductIds) {
-        const existingProduct = currentState.products.find(p => p.productId === productId);
-        if (!existingProduct) {
-          // Determine product type for individual query
-          const isConsumable = iapProductIds.consumables.includes(productId);
-          const productType = isConsumable ? 'inapp' : 'subs';
-
-          await queryProducts([productId], productType);
-
-          // Small delay between individual queries
-          await new Promise(resolve => setTimeout(resolve, 100));
-
-          // Update current state for next iteration
-          currentState = get(store);
-        }
-      }
-    }
-
-  }
 
   async function purchaseProduct(productId: string, productType?: 'inapp' | 'subs', offerToken?: string): Promise<void> {
     try {
@@ -713,9 +658,7 @@ function createIAPStore() {
 
   function setupPurchaseListener(): void {
     if (typeof onPurchaseUpdated === 'function' && !purchaseListener) {
-      purchaseListener = onPurchaseUpdated((purchase: any) => {
-        console.log('🎧 Purchase listener received:', purchase);
-        
+      purchaseListener = onPurchaseUpdated((purchase: any) => {        
         const transaction: Transaction = {
           transactionId: purchase.purchaseToken || purchase.orderId || 'unknown',
           productId: purchase.productId,
@@ -724,11 +667,6 @@ function createIAPStore() {
           isAutoRenewing: purchase.isAutoRenewing || false,
           error: undefined
         };
-
-        console.log('🔄 Updating IAP store with new purchase/transaction:', {
-          purchase,
-          transaction
-        });
 
         update(state => {
           const newPurchases = [...state.purchases.filter(p => p.purchaseToken !== purchase.purchaseToken), purchase];
@@ -751,8 +689,6 @@ function createIAPStore() {
             }
           }
 
-          console.log(`✅ IAP store updated: ${newPurchases.length} purchases, ${newTransactions.length} transactions`);
-
           return {
             ...state,
             purchases: newPurchases,
@@ -761,8 +697,6 @@ function createIAPStore() {
           };
         });
       });
-      
-      console.log('🎧 Purchase listener setup complete');
     }
   }
 

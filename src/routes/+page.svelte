@@ -28,9 +28,10 @@
     }
     
     try {
-      await purchaseManager.purchaseProduct(productId, userId);
-      // Refresh user store to update token balance
-      await userStore.refreshTokenBalance();
+      const result = await purchaseManager.purchaseProduct(productId, userId);
+      
+      // Immediately update token balance without database call
+      userStore.updateTokenBalanceAfterPurchase(result.newTokenBalance.tokenCost);
       
       // Show success toast
       const product = purchaseManager.getProduct(productId);

@@ -97,7 +97,7 @@ class PurchaseManager {
   }
 
   // Purchase product with cache invalidation
-  async purchaseProduct(productId: string, userId: string): Promise<void> {
+  async purchaseProduct(productId: string, userId: string): Promise<{ purchase: any; newTokenBalance: any }> {
     this.store.update(state => ({
       ...state,
       purchaseLoading: { ...state.purchaseLoading, [productId]: true },
@@ -105,8 +105,14 @@ class PurchaseManager {
     }));
 
     try {
+      // Get the product to calculate new token balance
+      const product = this.getProduct(productId);
+      if (!product) {
+        throw new Error('Product not found');
+      }
+
       // Execute purchase
-      await invoke('purchase_product', { productId, userId });
+      const purchase = await invoke('purchase_product', { productId, userId });
 
       // Invalidate relevant caches
       cacheManager.handlePurchaseCompletion(userId);
@@ -114,7 +120,11 @@ class PurchaseManager {
       // Also invalidate products cache in case purchase affects availability
       cacheManager.delete(PRODUCTS_CACHE_KEY);
 
-      console.log(`Successfully purchased product: ${productId}`);
+      // Return purchase result and token cost for immediate balance update
+      return { 
+        purchase, 
+        newTokenBalance: { tokenCost: product.token_cost }
+      };
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Purchase failed';
