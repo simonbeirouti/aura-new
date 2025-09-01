@@ -373,7 +373,7 @@
                         class="grid grid-cols-2 md:grid-cols-4 gap-4"
                     >
                         <div class="text-left">
-                            <div class="text-2xl font-bold text-primary">
+                            <div class="text-xl font-bold text-primary">
                                 {purchases.filter((p) => p.purchase_state === 0)
                                     .length}
                             </div>
@@ -382,7 +382,7 @@
                             </div>
                         </div>
                         <div class="text-right">
-                            <div class="text-2xl font-bold text-primary">
+                            <div class="text-xl font-bold text-primary">
                                 {cachedTotalValue}
                             </div>
                             <div class="text-sm text-muted-foreground">

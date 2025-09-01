@@ -1,6 +1,7 @@
 import { writable, derived, get } from 'svelte/store';
 import { browser } from '$app/environment';
 import { getUserTokenBalance, getUserSubscriptionsWithSync, syncSubscriptionsWithIAP, type UserSubscriptionRecord } from '$lib/utils/iapDatabase';
+import { invoke } from '@tauri-apps/api/core';
 import { iapStore } from './iapStore';
 
 /**
@@ -16,6 +17,30 @@ export interface UserTokenBalance {
   tokens_available: number;
 }
 
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  token_cost: number;
+  category: string;
+  is_active: boolean;
+  metadata: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Purchase {
+  id: string;
+  user_id: string;
+  product_id: string;
+  token_cost: number;
+  purchase_status: 'pending' | 'completed' | 'failed' | 'refunded';
+  transaction_id: string | null;
+  metadata: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface UserState {
   // Token management
   tokenBalance: UserTokenBalance;
@@ -26,6 +51,10 @@ export interface UserState {
   subscriptions: UserSubscriptionRecord[];
   subscriptionLoading: boolean;
   subscriptionError: string | null;
+  
+  // Purchase management
+  purchaseLoading: boolean;
+  purchaseError: string | null;
   
   // Cache management
   lastTokenUpdate: number | null;
@@ -45,6 +74,8 @@ function createUserStore() {
     subscriptions: [],
     subscriptionLoading: false,
     subscriptionError: null,
+    purchaseLoading: false,
+    purchaseError: null,
     lastTokenUpdate: null,
     lastSubscriptionUpdate: null,
     cacheValidDuration: 5 * 60 * 1000, // 5 minutes
@@ -310,6 +341,76 @@ function createUserStore() {
   }
 
   /**
+   * Purchase a product with tokens
+   */
+  async function purchaseProduct(productId: string): Promise<Purchase> {
+    const currentState = get({ subscribe });
+    
+    if (!currentState.userId) {
+      throw new Error('User not initialized');
+    }
+
+    update(state => ({ ...state, purchaseLoading: true, purchaseError: null }));
+
+    try {
+      // Call Tauri command to process purchase
+      const purchase = await invoke<Purchase>('purchase_product', {
+        userId: currentState.userId,
+        productId
+      });
+
+      // Refresh token balance after successful purchase
+      await refreshTokenBalance(true);
+
+      update(state => ({ ...state, purchaseLoading: false, purchaseError: null }));
+      
+      return purchase;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Purchase failed';
+      
+      update(state => ({
+        ...state,
+        purchaseLoading: false,
+        purchaseError: errorMessage
+      }));
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Get available products
+   */
+  async function getProducts(): Promise<Product[]> {
+    try {
+      return await invoke<Product[]>('get_products');
+    } catch (error) {
+      console.error('Failed to fetch products:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get user's purchase history
+   */
+  async function getPurchaseHistory(): Promise<Purchase[]> {
+    const currentState = get({ subscribe });
+    
+    if (!currentState.userId) {
+      throw new Error('User not initialized');
+    }
+
+    try {
+      return await invoke<Purchase[]>('get_user_purchases', {
+        userId: currentState.userId
+      });
+    } catch (error) {
+      console.error('Failed to fetch purchase history:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Reset store state
    */
   function reset(): void {
@@ -327,6 +428,9 @@ function createUserStore() {
     hasActiveSubscription,
     hasSufficientTokens,
     getActiveSubscription,
+    purchaseProduct,
+    getProducts,
+    getPurchaseHistory,
     startPeriodicChecks,
     stopPeriodicChecks,
     reset

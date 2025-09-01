@@ -6,6 +6,8 @@ mod database;
 mod enhanced_store;
 // IAP database management module
 mod iap_database;
+// Purchases management module
+mod purchases;
 
 use serde::{Deserialize, Serialize};
 
@@ -83,7 +85,12 @@ pub fn run() {
             iap_database::check_transaction_exists,
             iap_database::update_subscription_data,
             iap_database::update_subscription_status,
-            iap_database::get_user_iap_transactions
+            iap_database::get_user_iap_transactions,
+            // Purchase management commands
+            purchases::get_products,
+            purchases::purchase_product,
+            purchases::get_user_purchases,
+            purchases::can_purchase_product
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
