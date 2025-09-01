@@ -8,6 +8,8 @@
     "opener:default",
     "store:default",
     "http:default",
-    "iap:default"
+    "iap:default",
+    "biometric:default",
+    "notification:default"
   ]
 }

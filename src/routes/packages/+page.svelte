@@ -10,10 +10,6 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
-  import { processSuccessfulPurchase, checkTransactionExists } from "$lib/utils/iapDatabase";
-  import { userStore } from "$lib/stores/userStore";
-  import { authStore } from "$lib/stores/unifiedAuth";
-
 
   let purchasingProduct = "";
 

@@ -8,6 +8,10 @@ mod enhanced_store;
 mod iap_database;
 // Purchases management module
 mod purchases;
+// Biometric store management module
+mod biometric_store;
+// Notifications management module
+mod notifications;
 
 use serde::{Deserialize, Serialize};
 
@@ -40,14 +44,22 @@ fn get_platform_info() -> PlatformInfo {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {    
-    let mut builder = tauri::Builder::default()
+pub fn run() {
+    tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_iap::init());
-    
-    builder
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_iap::init())
+        .setup(|app| {
+            #[cfg(mobile)]
+            let _ = app.handle().plugin(tauri_plugin_biometric::init());
+            
+            // Setup notification handlers
+            let _ = notifications::setup_notification_handlers(&app.handle());
+            
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Platform information command
             get_platform_info,
@@ -90,7 +102,21 @@ pub fn run() {
             purchases::get_products,
             purchases::purchase_product,
             purchases::get_user_purchases,
-            purchases::can_purchase_product
+            purchases::can_purchase_product,
+            // Biometric store management commands
+            biometric_store::get_biometric_settings,
+            biometric_store::update_biometric_settings,
+            biometric_store::check_biometric_availability,
+            biometric_store::authenticate_biometric,
+            biometric_store::set_biometric_enabled,
+            biometric_store::should_authenticate_on_startup,
+            // Notification management commands
+            notifications::request_notification_permission,
+            notifications::send_notification,
+            notifications::send_action_notification,
+            notifications::register_action_types,
+            notifications::get_notification_settings,
+            notifications::update_notification_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

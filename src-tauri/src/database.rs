@@ -26,7 +26,7 @@ pub struct DatabaseConfig {
 #[command]
 pub async fn init_database(
     database_url: String,
-    access_token: String,
+    _access_token: String,
     anon_key: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {

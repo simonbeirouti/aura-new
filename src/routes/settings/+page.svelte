@@ -12,6 +12,7 @@
         CrownIcon,
         HistoryIcon,
         CoinsIcon,
+        ShieldIcon,
     } from "lucide-svelte";
     import { Card, CardContent } from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
@@ -60,6 +61,7 @@
 
     // Navigation items array with title and link
     const navigationItems = [
+        { title: "Security & Notifications", link: "/settings/security-notifications", icon: ShieldIcon },
         { title: "Purchase History", link: "/settings/purchases", icon: HistoryIcon },
         { title: "Subscription", link: "/settings/subscription", icon: CrownIcon }
     ];
