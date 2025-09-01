@@ -3,6 +3,7 @@
     import AppLayout from "$lib/components/AppLayout.svelte";
     import { centralizedAuth } from "$lib/stores/unifiedAuth";
     import { settingsActions, profileStore } from "$lib/stores/settingsStore";
+    import { formattedAvailableTokens } from "$lib/stores/userStore";
     import { goto } from "$app/navigation";
     import {
         UserIcon,
@@ -10,6 +11,7 @@
         LogOut,
         CrownIcon,
         HistoryIcon,
+        CoinsIcon,
     } from "lucide-svelte";
     import { Card, CardContent } from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
@@ -18,20 +20,30 @@
     // Reactive profile data from store
     $: ({ profile, loading: isProfileLoading } = $profileStore);
     
-    let lastCacheTime: number = 0;
-    const CACHE_DURATION = 60 * 60 * 1000; // 1 hour in milliseconds
+    // Show content immediately if we have cached data, regardless of loading state
+    $: showContent = profile !== null;
+    $: showLoading = isProfileLoading && !profile;
+    
+    // Add subtle loading indicator when refreshing in background
+    $: isBackgroundRefreshing = isProfileLoading && profile !== null;
 
-    onMount(async () => {
-        // Check if we need to initialize based on cache
-        const now = Date.now();
-        const isCacheExpired = !lastCacheTime || (now - lastCacheTime) > CACHE_DURATION;
-        const hasNoProfile = !profile;
+    onMount(() => {
+        // Always try to load cached data first (non-blocking)
+        settingsActions.loadProfile(false).catch(console.warn);
         
-        // Only initialize if cache is expired or no profile exists
-        if (isCacheExpired || hasNoProfile) {
-            await settingsActions.initialize();
-            lastCacheTime = now;
-        }
+        // Then refresh in background without blocking UI
+        setTimeout(() => {
+            settingsActions.refreshProfileInBackground().catch(console.warn);
+        }, 100);
+        
+        // Set up periodic background refresh every 5 minutes
+        const refreshInterval = setInterval(() => {
+            settingsActions.refreshProfileInBackground().catch(console.warn);
+        }, 5 * 60 * 1000);
+        
+        return () => {
+            clearInterval(refreshInterval);
+        };
     });
 
     function goBack() {
@@ -58,12 +70,14 @@
         <ModeToggle />
     </div>
 
-    {#if isProfileLoading}
-        <!-- Loading state -->
+    {#if showLoading}
+        <!-- Loading state - only show when no cached data -->
         <div class="flex justify-center items-center py-12">
             <div class="w-8 h-8 border-4 border-primary/20 border-t-primary rounded-full animate-spin"></div>
         </div>
-    {:else}
+    {/if}
+    
+    {#if showContent}
             <!-- Profile Information Card -->
         <Card class="mb-6">
             <CardContent>
@@ -93,14 +107,15 @@
                                     @{profile?.username || 'Not set'}
                                 </p>
                             </div>
-                            {#if profile?.full_name}
-                                <div>
-                                    <p class="text-sm text-muted-foreground mb-1">Full Name</p>
+                            <div>
+                                <p class="text-sm text-muted-foreground mb-1">Available Tokens</p>
+                                <div class="flex items-center gap-2">
+                                    <CoinsIcon class="w-5 h-5 text-yellow-500" />
                                     <p class="text-lg text-foreground font-medium">
-                                        {profile.full_name}
+                                        {$formattedAvailableTokens || 0}
                                     </p>
                                 </div>
-                            {/if}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -133,5 +148,5 @@
                 <span class="text-foreground font-medium">Log out</span>
             </Button>
         </div>
-        {/if}
+    {/if}
 </AppLayout>

@@ -2,6 +2,7 @@ import { createEnhancedStore, storeManager, type BaseStore } from './core/storeM
 import { invoke } from '@tauri-apps/api/core';
 import { sessionActions } from './sessionStore';
 import { loadingActions } from './loadingStore';
+import { getSupabaseConfig } from './unifiedAuth';
 
 // Profile interface (matches SQL schema in migrations/001_initial.sql)
 export interface Profile {
@@ -150,7 +151,6 @@ class DataStore {
       }
 
       // Use centralized Supabase config from unifiedAuth
-      const { getSupabaseConfig } = await import('./unifiedAuth');
       const config = getSupabaseConfig();
       
       if (!config.hasValidConfig) {

@@ -6,6 +6,7 @@
   import GlobalLoading from "$lib/components/GlobalLoading.svelte";
   import Onboarding from "$lib/components/Onboarding.svelte";
   import FooterNavigation from "$lib/components/FooterNavigation.svelte";
+  import SubscriptionManager from "$lib/components/SubscriptionManager.svelte";
   import { centralizedAuth } from "$lib/stores/unifiedAuth";
   import { loadingActions } from "$lib/stores/loadingStore";
   import { toast } from "svelte-sonner";
@@ -68,6 +69,8 @@
       </div>
     </div>
   {:else if $shouldShowApp}
+    <SubscriptionManager />
+    
     <div class="flex-1" style="height: calc(100vh - 4rem); max-height: calc(100vh - 4rem); overflow: hidden;">
       <slot />
     </div>

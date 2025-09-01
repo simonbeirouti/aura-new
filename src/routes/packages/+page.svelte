@@ -10,6 +10,9 @@
   } from "$lib/components/ui/card";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
+  import { processSuccessfulPurchase, checkTransactionExists } from "$lib/utils/iapDatabase";
+  import { userStore } from "$lib/stores/userStore";
+  import { authStore } from "$lib/stores/unifiedAuth";
 
 
   let purchasingProduct = "";
@@ -24,24 +27,37 @@
   // Use product configuration from store - same as IAPTester
   $: tokenPackages = iapProductConfig.consumables;
 
-  // Helper to get product display info - same as IAPTester
+
+  // Cache for stable pricing display (prevents flashing)
+  let pricingCache: Record<string, {title: string, price: string, currency: string}> = {};
+  
+  // Helper to get product display info with stable pricing
   function getProductInfo(productId: string) {
     const storeProduct = state.products.find((p) => p.productId === productId);
-    if (storeProduct) {
-      return {
-        title: storeProduct.title,
+    const tokenData = iapProductConfig.consumables.find((p) => p.id === productId);
+    
+    // If we have store product data, cache it and use it
+    if (storeProduct && storeProduct.formattedPrice) {
+      const productInfo = {
+        title: tokenData?.tokens || storeProduct.title || productId,
         price: storeProduct.formattedPrice,
-        currency: storeProduct.priceCurrencyCode,
+        currency: storeProduct.priceCurrencyCode || "USD",
       };
+      
+      // Cache this pricing to prevent future flashing
+      pricingCache[productId] = productInfo;
+      return productInfo;
     }
 
-    // Fallback to config data if product not loaded
-    const tokenData = iapProductConfig.consumables.find(
-      (p) => p.id === productId,
-    );
+    // If we have cached pricing from previous load, use it (prevents flashing)
+    if (pricingCache[productId]) {
+      return pricingCache[productId];
+    }
+
+    // Only show config fallback if we have no cached data
     return {
       title: tokenData?.tokens || productId,
-      price: tokenData?.price || "Unknown",
+      price: tokenData?.price || "Loading...",
       currency: "USD",
     };
   }
@@ -84,47 +100,21 @@
     if (purchasingProduct) return;
     purchasingProduct = productId;
 
-    const initialPurchaseCount = $iapStore.purchases.length;
-    const initialTransactionCount = $iapStore.transactions.length;
-
     try {
+      // Initiate purchase - the IAP listener will handle completion automatically
       await iapStore.purchaseProduct(productId, "inapp");
-
-      // Wait a moment for purchase to be processed
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Check if purchase actually completed by looking at store state
-      const currentState = $iapStore;
-      const purchaseAdded =
-        currentState.purchases.length > initialPurchaseCount;
-      const transactionAdded =
-        currentState.transactions.length > initialTransactionCount;
-      const recentTransaction =
-        currentState.transactions[currentState.transactions.length - 1];
-
-      if (purchaseAdded || transactionAdded) {
-        // Verify the transaction is for this product and successful
-        if (
-          recentTransaction &&
-          recentTransaction.productId === productId &&
-          recentTransaction.status === "purchased"
-        ) {
-          toast.success("✅ Purchase completed successfully!");
-        } else {
-          toast.error("❌ Purchase failed or was cancelled");
-        }
-      } else {
-        // No purchase record created - likely cancelled or failed
-        toast.error("❌ Purchase was cancelled or failed");
-      }
+      
+      // Show immediate feedback and let IAP listener handle the rest
+      toast.success("✅ Purchase completed successfully!");
+      
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : "Purchase failed";
-      toast.error(`❌ Purchase failed: ${errorMessage}`);
+      toast.error(`❌ Purchase error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
+      // Reset button state
       purchasingProduct = "";
     }
   }
+
 </script>
 
 <AppLayout
@@ -133,6 +123,7 @@
   onBack={goBack}
   maxWidth="max-w-4xl"
 >
+
   {#if loading}
     <div class="flex justify-center items-center py-12">
       <div

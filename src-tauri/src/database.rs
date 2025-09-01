@@ -42,7 +42,7 @@ pub async fn init_database(
 }
 
 // Get authenticated database configuration from session store
-async fn get_authenticated_db(app: &tauri::AppHandle) -> Result<DatabaseConfig, String> {
+pub async fn get_authenticated_db(app: &tauri::AppHandle) -> Result<DatabaseConfig, String> {
     let store = app.store("session.store")
         .map_err(|e| format!("Failed to access session store: {}", e))?;
     

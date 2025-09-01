@@ -11,9 +11,9 @@
         CameraIcon,
         LoaderIcon,
     } from "lucide-svelte";
+    import { toast } from "svelte-sonner";
     import { Button } from "../ui/button";
     import { Input } from "../ui/input";
-    import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../ui/card";
     import { Badge } from "../ui/badge";
 
     const dispatch = createEventDispatcher();
@@ -21,8 +21,6 @@
     // UI state
     let isSaving = false;
     let isUploading = false;
-    let uploadError = "";
-    let usernameError = "";
     let avatarPreview = "";
 
     // Profile form data (for authenticated users)
@@ -79,7 +77,6 @@
 
             // Upload to storage
             isUploading = true;
-            uploadError = "";
 
             const result = await uploadAvatar(file, $centralizedAuth.user.id);
             if (result.success && result.publicUrl) {
@@ -107,10 +104,10 @@
                 throw new Error(result.error || "Upload failed");
             }
         } catch (error) {
-            uploadError =
-                error instanceof Error
-                    ? error.message
-                    : "Failed to upload avatar";
+            const errorMessage = error instanceof Error
+                ? error.message
+                : "Failed to upload avatar";
+            toast.error(errorMessage);
             avatarPreview = "";
         } finally {
             isUploading = false;
@@ -123,7 +120,7 @@
 
     async function checkUsername() {
         if (!profileData.username || profileData.username.length < 3) {
-            usernameError = "Username must be at least 3 characters";
+            toast.error("Username must be at least 3 characters");
             return false;
         }
 
@@ -132,13 +129,12 @@
                 profileData.username,
             );
             if (!isAvailable) {
-                usernameError = "Username is already taken";
+                toast.error("Username is already taken");
                 return false;
             }
-            usernameError = "";
             return true;
         } catch (error) {
-            usernameError = "Failed to check username availability";
+            toast.error("Failed to check username availability");
             return false;
         }
     }
@@ -238,128 +234,112 @@
     }
 </script>
 
-<!-- Profile Setup Layout matching steps 1 & 2 -->
-<div class="min-h-screen bg-background flex flex-col relative">
-    <!-- Main Content Container -->
-    <div class="flex-1 flex flex-col justify-between items-center px-8 py-16">
-        <!-- Top Section: Profile Form -->
-        <div class="flex-1 flex flex-col justify-center items-center max-w-md mx-auto">
-            <Card class="w-full max-w-lg border-0 shadow-lg bg-card/50 backdrop-blur-sm">
-                <CardHeader class="text-center pb-6">
-                    <div class="flex justify-center mb-2">
-                        <Badge variant="secondary" class="px-3 py-1">
-                            Final Step
-                        </Badge>
-                    </div>
-                    <CardTitle class="text-3xl font-bold">
-                        Set up your profile
-                    </CardTitle>
-                    <CardDescription class="text-lg leading-relaxed">
-                        Tell us a bit about yourself to personalize your experience
-                    </CardDescription>
-                </CardHeader>
-                <CardContent class="space-y-6">
-
-                    <!-- Avatar Upload -->
-                    <div class="flex flex-col items-center gap-4">
-                        <Button
-                            variant="outline"
-                            class="w-32 h-32 rounded-full border-2 border-dashed hover:border-primary transition-colors p-0 overflow-hidden"
-                            onclick={triggerFileInput}
-                            disabled={isUploading}
-                        >
-                            {#if avatarPreview}
-                                <img
-                                    src={avatarPreview}
-                                    alt="Avatar preview"
-                                    class="w-full h-full object-cover"
-                                />
-                            {:else if isUploading}
-                                <LoaderIcon class="w-8 h-8 animate-spin text-primary" />
-                            {:else}
-                                <div class="flex flex-col items-center gap-2">
-                                    <CameraIcon class="w-8 h-8 text-muted-foreground" />
-                                    <span class="text-xs text-muted-foreground">Add Photo</span>
-                                </div>
-                            {/if}
-                        </Button>
-                        <p class="text-xs text-muted-foreground text-center">
-                            Click to add a profile photo
-                        </p>
-                    </div>
-
-                    <!-- File Input -->
-                    <input
-                        bind:this={fileInput}
-                        type="file"
-                        accept="image/*"
-                        class="hidden"
-                        onchange={handleAvatarUpload}
-                    />
-
-                    <!-- Form Fields -->
-                    <div class="space-y-4">
-                        <!-- Full Name -->
-                        <div class="space-y-2">
-                            <Input
-                                id="full-name-input"
-                                type="text"
-                                bind:value={profileData.full_name}
-                                placeholder="Enter your full name"
-                                required
-                            />
-                        </div>
-
-                        <!-- Username -->
-                        <div class="space-y-2">
-                            <Input
-                                id="username-input"
-                                type="text"
-                                bind:value={profileData.username}
-                                placeholder="Choose a username"
-                                onblur={checkUsername}
-                                class={usernameError ? 'border-destructive' : ''}
-                                required
-                            />
-                            {#if usernameError}
-                                <div class="text-sm text-destructive mt-1">
-                                    {usernameError}
-                                </div>
-                            {/if}
-                        </div>
-                    </div>
-
-                    {#if uploadError}
-                        <Card class="border-destructive bg-destructive/10">
-                            <CardContent class="p-3">
-                                <p class="text-sm text-destructive">{uploadError}</p>
-                            </CardContent>
-                        </Card>
-                    {/if}
-                </CardContent>
-            </Card>
+<!-- Full Screen Profile Setup Layout -->
+<div class="min-h-screen bg-background flex flex-col overflow-hidden">
+    <!-- Header Section -->
+    <div class="flex flex-col items-center text-center pt-8 pb-4 px-6">
+        <div class="flex justify-center mb-2">
+            <Badge variant="secondary" class="px-3 py-1 text-sm">
+                Final Step
+            </Badge>
         </div>
+        <h1 class="text-3xl font-bold mb-2 text-foreground">
+            Set up your profile
+        </h1>
+        <p class="text-lg text-muted-foreground leading-relaxed max-w-sm">
+            Tell us a bit about yourself to personalize your experience
+        </p>
+    </div>
 
-        <!-- Bottom Section: Complete Setup Button (aligned with steps 1-2) -->
-        <div class="w-full mx-auto">
-            <div class="flex justify-center items-center px-2 pb-12">
+    <!-- Main Content Section -->
+    <div class="flex-1 flex flex-col items-center justify-center px-6 pb-48">
+        <div class="w-full max-w-sm space-y-6">
+            <!-- Avatar Upload -->
+            <div class="flex flex-col items-center gap-2">
                 <Button
-                    onclick={() => completeOnboarding(false)}
-                    disabled={isSaving ||
-                        !profileData.full_name ||
-                        !profileData.username ||
-                        !!usernameError}
-                    size="lg"
-                    class="px-8"
+                    variant="outline"
+                    class="w-36 h-36 rounded-full border-2 border-dashed hover:border-primary transition-colors p-0 overflow-hidden"
+                    onclick={triggerFileInput}
+                    disabled={isUploading}
                 >
-                    {#if isSaving}
-                        <LoaderIcon class="w-4 h-4 animate-spin mr-2" />
-                        Creating...
+                    {#if avatarPreview}
+                        <img
+                            src={avatarPreview}
+                            alt="Avatar preview"
+                            class="w-full h-full object-cover"
+                        />
+                    {:else if isUploading}
+                        <LoaderIcon class="w-5 h-5 animate-spin text-primary" />
                     {:else}
-                        Complete Setup
+                        <div class="flex flex-col items-center gap-1">
+                            <CameraIcon class="w-5 h-5 text-muted-foreground" />
+                            <span class="text-xs text-muted-foreground">Add Photo</span>
+                        </div>
                     {/if}
                 </Button>
+                <p class="text-sm text-muted-foreground text-center">
+                    Click to add a profile photo
+                </p>
             </div>
+
+            <!-- File Input -->
+            <input
+                bind:this={fileInput}
+                type="file"
+                accept="image/*"
+                class="hidden"
+                onchange={handleAvatarUpload}
+            />
+
+            <!-- Form Fields -->
+            <div class="space-y-4">
+                <!-- Full Name -->
+                <div class="space-y-1">
+                    <Input
+                        id="full-name-input"
+                        type="text"
+                        bind:value={profileData.full_name}
+                        placeholder="Enter your full name"
+                        class="h-11 text-base"
+                        required
+                    />
+                </div>
+
+                <!-- Username -->
+                <div class="space-y-1">
+                    <Input
+                        id="username-input"
+                        type="text"
+                        bind:value={profileData.username}
+                        placeholder="Choose a username"
+                        onblur={checkUsername}
+                        class="h-11 text-base"
+                        required
+                    />
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Fixed Bottom Button -->
+    <div class="fixed bottom-0 left-0 right-0 p-6 bg-background/95 backdrop-blur-sm">
+        <div class="w-full max-w-sm mx-auto">
+            <Button
+                onclick={() => completeOnboarding(false)}
+                disabled={isSaving ||
+                    !profileData.full_name ||
+                    !profileData.username}
+                size="lg"
+                class="w-full h-11 text-base font-medium"
+            >
+                {#if isSaving}
+                    <LoaderIcon class="w-4 h-4 animate-spin mr-2" />
+                    Creating...
+                {:else}
+                    Complete Setup
+                {/if}
+            </Button>
         </div>
     </div>
 </div>

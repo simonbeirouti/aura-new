@@ -85,7 +85,6 @@ interface IAPState {
   activeSubscriptions: Purchase[];
   isLoading: boolean;
   error: string | null;
-  logs: string[];
   pluginAvailable: boolean;
   // Caching fields
   lastInitialized: number | null;
@@ -106,7 +105,6 @@ function createIAPStore() {
     activeSubscriptions: [],
     isLoading: false,
     error: null,
-    logs: [],
     pluginAvailable: false,
     // Caching defaults
     lastInitialized: null,
@@ -117,13 +115,6 @@ function createIAPStore() {
 
   const { subscribe, update } = store;
 
-  function addLog(message: string) {
-    const timestamp = new Date().toLocaleTimeString();
-    update(state => ({
-      ...state,
-      logs: [...state.logs, `[${timestamp}] ${message}`]
-    }));
-  }
 
   async function isDesktopMacOS(): Promise<boolean> {
     try {
@@ -164,7 +155,6 @@ function createIAPStore() {
         currentState.isInitialized && 
         currentState.lastInitialized && 
         (now - currentState.lastInitialized) < currentState.cacheValidDuration) {
-      addLog('IAP already initialized and cache valid, skipping initialization');
       return true;
     }
     try {
@@ -241,22 +231,6 @@ function createIAPStore() {
         pluginAvailable: true,
         lastInitialized: now
       }));
-
-      // Query products only if cache is invalid or forced
-      const shouldQueryProducts = forceRefresh || 
-        !currentState.lastProductsQuery || 
-        (now - currentState.lastProductsQuery) > currentState.cacheValidDuration ||
-        currentState.products.length === 0;
-
-      if (shouldQueryProducts) {
-        try {
-          await queryAllProductsInternal();
-        } catch (error) {
-          addLog(`Auto product query failed: ${error}`);
-        }
-      } else {
-        addLog('Products cache valid, skipping product query');
-      }
 
       return true;
 
@@ -395,59 +369,6 @@ function createIAPStore() {
     }
   }
 
-  // Internal function for auto-querying after initialization
-  async function queryAllProductsInternal(): Promise<void> {
-    const now = Date.now();
-    
-    // Clear existing products to start fresh
-    update(state => ({ ...state, products: [] }));
-
-    // Strategy 1: Query consumables explicitly as 'inapp' first
-    if (iapProductIds.consumables.length > 0) {
-      await queryProducts(iapProductIds.consumables, 'inapp');
-    }
-
-    // Strategy 2: Query subscriptions with 'subs' type
-    if (iapProductIds.subscriptions.length > 0) {
-      await queryProducts(iapProductIds.subscriptions, 'subs');
-    }
-
-    // Strategy 3: Individual queries for any missing products
-    const allProductIds = [...iapProductIds.consumables, ...iapProductIds.subscriptions];
-    let currentState = get(store);
-
-    if (currentState.products.length < allProductIds.length) {
-      for (const productId of allProductIds) {
-        const existingProduct = currentState.products.find(p => p.productId === productId);
-        if (!existingProduct) {
-          // Determine product type for individual query
-          const isConsumable = iapProductIds.consumables.includes(productId);
-          const productType = isConsumable ? 'inapp' : 'subs';
-
-          await queryProducts([productId], productType);
-
-          // Small delay between individual queries
-          await new Promise(resolve => setTimeout(resolve, 100));
-
-          // Update current state for next iteration
-          currentState = get(store);
-        }
-      }
-    }
-
-    // Log final status for debugging if needed
-    const finalState = get(store);
-    if (finalState.products.length === 0) {
-      addLog(`No products loaded - check StoreKit configuration`);
-    }
-
-    // Show which products are missing for debugging
-    const loadedIds = finalState.products.map(p => p.productId);
-    const missingIds = allProductIds.filter(id => !loadedIds.includes(id));
-    if (missingIds.length > 0) {
-      addLog(`Missing products: ${missingIds.join(', ')}`);
-    }
-  }
 
   async function purchaseProduct(productId: string, productType?: 'inapp' | 'subs', offerToken?: string): Promise<void> {
     try {
@@ -494,13 +415,13 @@ function createIAPStore() {
       // Use the IAP API to initiate purchase
       const purchaseResponse = await purchase(productId, finalProductType, offerToken);
 
-      // Handle purchase response - iOS StoreKit returns different formats
+      // Handle immediate purchase response (iOS may return completed purchase data)
       if (purchaseResponse) {
         const purchaseData = purchaseResponse as any;
 
-        // Check if this is a successful purchase or just a purchase initiation
+        // Check if this is a completed purchase response
         if (purchaseData.purchaseState !== undefined) {
-          // This is a completed purchase
+          // This is a completed purchase - process it immediately
           const transaction: Transaction = {
             transactionId: purchaseData.purchaseToken || purchaseData.orderId || `${productId}_${Date.now()}`,
             productId: purchaseData.productId || productId,
@@ -510,29 +431,23 @@ function createIAPStore() {
             error: undefined
           };
 
-          // For consumables, create a synthetic purchase record since iOS may not persist them
-          const isConsumable = iapProductIds.consumables.includes(productId);
-          let purchaseRecord = purchaseData as Purchase;
-
-          if (isConsumable && purchaseData.purchaseState === 0) {
-            // Create a synthetic purchase record for consumables
-            purchaseRecord = {
-              orderId: purchaseData.orderId || `order_${Date.now()}`,
-              packageName: purchaseData.packageName || 'com.aura.app',
-              productId: productId,
-              purchaseTime: Date.now(),
-              purchaseToken: purchaseData.purchaseToken || `token_${Date.now()}`,
-              purchaseState: 0,
-              isAutoRenewing: false,
-              isAcknowledged: true,
-              originalJson: JSON.stringify(purchaseData),
-              signature: purchaseData.signature || 'synthetic'
-            };
-          }
+          // Create purchase record
+          const purchaseRecord: Purchase = {
+            orderId: purchaseData.orderId || `order_${Date.now()}`,
+            packageName: purchaseData.packageName || 'com.testing101.app',
+            productId: productId,
+            purchaseTime: purchaseData.purchaseTime || Date.now(),
+            purchaseToken: purchaseData.purchaseToken || `token_${Date.now()}`,
+            purchaseState: purchaseData.purchaseState,
+            isAutoRenewing: purchaseData.isAutoRenewing || false,
+            isAcknowledged: purchaseData.isAcknowledged || true,
+            originalJson: JSON.stringify(purchaseData),
+            signature: purchaseData.signature
+          };
 
           update(state => {
-            const newPurchases = [...state.purchases, purchaseRecord];
-            const newTransactions = [...state.transactions, transaction];
+            const newPurchases = [...state.purchases.filter(p => p.purchaseToken !== purchaseRecord.purchaseToken), purchaseRecord];
+            const newTransactions = [...state.transactions.filter(t => t.transactionId !== transaction.transactionId), transaction];
 
             // Update active subscriptions if this is a subscription
             let newActiveSubscriptions = [...state.activeSubscriptions];
@@ -540,7 +455,7 @@ function createIAPStore() {
               const subscriptionPurchase = {
                 ...purchaseRecord,
                 subscriptionStatus: 'active' as const,
-                renewalDate: purchaseData.expiryTime || (Date.now() + (30 * 24 * 60 * 60 * 1000)), // Default 30 days
+                renewalDate: purchaseData.expiryTime || (Date.now() + (30 * 24 * 60 * 60 * 1000)),
                 expiryTime: purchaseData.expiryTime || (Date.now() + (30 * 24 * 60 * 60 * 1000))
               };
 
@@ -557,22 +472,24 @@ function createIAPStore() {
             };
           });
 
-          // iOS auto-acknowledges, but call acknowledgePurchase for consistency
+          // Acknowledge purchase if needed
           if (purchaseData.purchaseState === 0 && purchaseData.purchaseToken) {
             try {
               await acknowledgePurchase(purchaseData.purchaseToken);
             } catch (ackError) {
-              // Acknowledgment failed, but purchase may still be valid
+              console.error('Acknowledgment failed:', ackError);
             }
           }
         }
       }
+      
     } catch (error) {
       const errorMsg = `Error purchasing product: ${error}`;
       update(state => ({
         ...state,
         error: errorMsg
       }));
+      throw error;
     }
   }
 
@@ -698,10 +615,7 @@ function createIAPStore() {
         // Attempt to open Settings app directly to subscriptions
         const settingsUrl = 'App-prefs:APPLE_ID&path=SUBSCRIPTIONS';
         await invoke('open_url', { url: settingsUrl });
-        addLog(`Opened iOS Settings for subscription management: ${productId}`);
       } catch (urlError) {
-        // Fallback: just log the instruction
-        addLog(`To cancel subscription ${productId}, go to: iOS Settings > Apple ID > Subscriptions > ${productId} > Cancel Subscription`);
         throw new Error('Please go to iOS Settings > Apple ID > Subscriptions to cancel your subscription');
       }
 
@@ -724,8 +638,10 @@ function createIAPStore() {
     update(state => {
       const now = Date.now();
       const updatedSubscriptions = state.activeSubscriptions.map(sub => {
-        // Check if subscription has expired
-        if (sub.expiryTime && sub.expiryTime < now && sub.subscriptionStatus === 'active') {
+        // Check if subscription has expired - convert expiryTime from seconds to milliseconds if needed
+        const expiryTimeMs = sub.expiryTime ? (sub.expiryTime > 1000000000000 ? sub.expiryTime : sub.expiryTime * 1000) : null;
+        
+        if (expiryTimeMs && expiryTimeMs < now && sub.subscriptionStatus === 'active') {
           return { ...sub, subscriptionStatus: 'expired' as const };
         }
         return sub;
@@ -742,7 +658,7 @@ function createIAPStore() {
 
   function setupPurchaseListener(): void {
     if (typeof onPurchaseUpdated === 'function' && !purchaseListener) {
-      purchaseListener = onPurchaseUpdated((purchase: any) => {
+      purchaseListener = onPurchaseUpdated((purchase: any) => {        
         const transaction: Transaction = {
           transactionId: purchase.purchaseToken || purchase.orderId || 'unknown',
           productId: purchase.productId,
@@ -802,8 +718,6 @@ function createIAPStore() {
     getSubscriptionStatus,
     updateSubscriptionStatus,
     clearError,
-    clearLogs,
-    addLog,
     setupPurchaseListener,
     cleanupPurchaseListener
   };

@@ -40,9 +40,18 @@
     }
 
     // Handle authentication success from OnboardingAuth component
-    function handleAuthSuccess() {
-        // Move to profile setup step
-        currentStep = 4;
+    async function handleAuthSuccess() {
+        // Wait a moment for the auth store to update with profile data
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Check if user has completed onboarding
+        if ($centralizedAuth.profile && $centralizedAuth.profile.onboarding_complete) {
+            // User has completed onboarding, dispatch completion
+            dispatch('complete');
+        } else {
+            // User needs to complete profile setup
+            currentStep = 4;
+        }
     }
 
     // Handle profile setup completion

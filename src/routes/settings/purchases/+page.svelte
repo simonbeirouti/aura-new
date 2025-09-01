@@ -4,115 +4,254 @@
     import AppLayout from "$lib/components/AppLayout.svelte";
     import { centralizedAuth } from "$lib/stores/unifiedAuth";
     import { iapStore, iapProductConfig } from "$lib/stores/iapStore";
+    import { getUserIAPTransactions, type IAPTransactionRecord } from "$lib/utils/iapDatabase";
     import { Card, CardContent } from "$lib/components/ui/card";
     import { Button } from "$lib/components/ui/button";
-    import { Badge } from "$lib/components/ui/badge";
-    import { toast } from "svelte-sonner";
     import { CreditCardIcon } from "lucide-svelte";
-
-    interface IAPPurchase {
-        orderId?: string;
-        packageName?: string;
-        productId: string;
-        purchaseTime?: number;
-        purchaseToken: string;
-        purchaseState: number; // 0 = purchased, 1 = canceled
-        isAutoRenewing?: boolean;
-        isAcknowledged?: boolean;
-        originalJson?: string;
-        signature?: string;
-    }
-
-    let purchases: IAPPurchase[] = [];
+    import { browser } from '$app/environment';
+    import { cacheManager, cacheKeys } from "$lib/stores/cacheManager";
+    
+    let purchases: IAPTransactionRecord[] = [];
     let loading = true;
+    let showLoading = false;
     let error: string | null = null;
     let iapState: any = {};
-    let lastCacheTime: number = 0;
-    const CACHE_DURATION = 60 * 60 * 1000; // 1 hour in milliseconds
+    let isInitialized = false;
+    
+    // Pre-computed display data to avoid reactive calculations and flashing
+    let cachedTotalValue = "$0.00 USD";
+    let cachedPurchaseDisplays: Array<{
+        purchase: IAPTransactionRecord;
+        name: string;
+        price: string;
+        currency: string;
+        emoji: string;
+        formattedDate: string;
+    }> = [];
+    
+    // Load cached data immediately on component initialization
+    if (browser) {
+        // Use async pattern for auth state
+        centralizedAuth.getState().then(authState => {
+            if (authState?.user?.id) {
+                const cached = cacheManager.get<IAPTransactionRecord[]>(cacheKeys.userPurchases(authState.user.id));
+                if (cached && cached.length > 0) {
+                    purchases = cached;
+                    computeDisplayData(cached);
+                    isInitialized = true;
+                }
+            }
+        }).catch(console.warn);
+    }
+    
+    // Show content immediately if we have cached data or after first load
+    $: showContent = isInitialized && (purchases.length > 0 || error === null);
 
-    onMount(() => {
-        // Subscribe to IAP store
-        const unsubscribe = iapStore.subscribe((state) => {
-            iapState = state;
-            // Filter to only show in-app purchases (consumables), not subscriptions
-            const allPurchases = state.purchases || [];
-            purchases = allPurchases.filter(purchase => 
-                iapProductConfig.consumables.some(consumable => consumable.id === purchase.productId)
-            );
-            
-            // Update cache time when purchases are loaded
-            if (state.purchases && state.purchases.length > 0 && state.lastPurchasesRestore) {
-                lastCacheTime = state.lastPurchasesRestore;
+    function setCachedPurchases(data: IAPTransactionRecord[], userId: string) {
+        if (!browser) return;
+        
+        try {
+            cacheManager.set(cacheKeys.userPurchases(userId), data);
+        } catch {
+            // Ignore cache errors
+        }
+    }
+
+    // Pre-compute all display data to avoid reactive calculations and flashing
+    function computeDisplayData(purchaseList: IAPTransactionRecord[]) {
+        const successfulPurchases = purchaseList.filter((p) => p.purchase_state === 0);
+        
+        // Compute individual purchase displays
+        cachedPurchaseDisplays = purchaseList.map(purchase => {
+            const productInfo = getProductInfo(purchase.product_id, purchase);
+            return {
+                purchase,
+                name: productInfo.name,
+                price: productInfo.price,
+                currency: productInfo.currency,
+                emoji: productInfo.emoji,
+                formattedDate: formatDate(purchase.purchase_time ? new Date(purchase.purchase_time).getTime() : undefined)
+            };
+        });
+        
+        // Compute total value using stored pricing first
+        if (successfulPurchases.length === 0) {
+            cachedTotalValue = "$0.00 USD";
+            return;
+        }
+        
+        let total = 0;
+        let currency = "USD";
+        
+        // Detect currency from original_json data first
+        for (const purchase of successfulPurchases) {
+            const originalData = purchase.original_json;
+            if (originalData?.priceCurrencyCode) {
+                currency = originalData.priceCurrencyCode;
+                break;
+            }
+        }
+        
+        // Calculate total using original_json pricing data
+        successfulPurchases.forEach((purchase) => {
+            const originalData = purchase.original_json;
+            if (originalData?.formattedPrice) {
+                // Use the currency from this purchase if we haven't detected one yet
+                if (originalData.priceCurrencyCode && currency === "USD") {
+                    currency = originalData.priceCurrencyCode;
+                }
+                
+                const priceMatch = originalData.formattedPrice.match(/[\d,]+\.?\d*/);
+                const storedPrice = priceMatch ? parseFloat(priceMatch[0].replace(/,/g, '')) : 0;
+                total += storedPrice;
+            } else {
+                // Fallback to product info calculation
+                const productInfo = getProductInfo(purchase.product_id, purchase);
+                total += productInfo.priceValue || 0;
+                
+                // Update currency from product info if available
+                if (productInfo.currency && currency === "USD") {
+                    currency = productInfo.currency;
+                }
             }
         });
+        
+        cachedTotalValue = `$${total.toFixed(2)} ${currency}`;
+    }
 
-        initializeIAPIfNeeded();
+    onMount(() => {
+        // Subscribe to IAP store for product info
+        const unsubscribe = iapStore.subscribe((state) => {
+            iapState = state;
+        });
+
+        // Load purchase history optimistically
+        async function loadPurchaseHistoryOptimistic() {
+            try {
+                // Try to get cached data first
+                const authState = await centralizedAuth.getState();
+                if (!authState.user?.id) {
+                    throw new Error('No authenticated user found');
+                }
+                
+                const cached = cacheManager.get<IAPTransactionRecord[]>(cacheKeys.userPurchases(authState.user.id));
+                if (cached && cached.length > 0) {
+                    purchases = cached;
+                    computeDisplayData(cached);
+                    isInitialized = true;
+                    showLoading = false;
+                    
+                    // Load fresh data in background
+                    setTimeout(async () => {
+                        try {
+                            if (authState.user?.id) {
+                                const freshPurchases = await getUserIAPTransactions(authState.user.id);
+                                if (freshPurchases.length > 0) {
+                                    purchases = freshPurchases;
+                                    computeDisplayData(freshPurchases);
+                                    setCachedPurchases(freshPurchases, authState.user.id);
+                                }
+                            }
+                        } catch (error) {
+                            console.error('Background refresh failed:', error);
+                        }
+                    }, 100);
+                    return;
+                }
+                
+                // If no cache, show loading and fetch fresh data
+                showLoading = true;
+                
+                const freshPurchases = await getUserIAPTransactions(authState.user.id);
+                purchases = freshPurchases;
+                computeDisplayData(freshPurchases);
+                setCachedPurchases(freshPurchases, authState.user.id);
+                isInitialized = true;
+                
+            } catch (err) {
+                console.error('Failed to load purchase history:', err);
+                error = err instanceof Error ? err.message : 'Failed to load purchase history';
+            } finally {
+                showLoading = false;
+            }
+        }
+        
+        loadPurchaseHistoryOptimistic();
+        
+        // Set up periodic background refresh every 10 minutes
+        const refreshInterval = setInterval(() => {
+            loadPurchaseHistoryOptimistic().catch(console.warn);
+        }, 10 * 60 * 1000);
 
         return () => {
             unsubscribe();
+            clearInterval(refreshInterval);
         };
     });
 
     function goBack() {
         goto("/settings");
     }
-
-    async function initializeIAPIfNeeded() {
+    
+    async function loadPurchaseHistory() {
+        loading = true;
+        showLoading = true;
+        error = null;
+        
         try {
-            loading = true;
-            error = null;
-
             const authState = await centralizedAuth.getState();
-            if (!authState.isAuthenticated || !authState.user?.id) {
-                error = "Please log in to view purchase history";
-                return;
-            }
-
-            const now = Date.now();
-            const isCacheExpired = !lastCacheTime || (now - lastCacheTime) > CACHE_DURATION;
-            const hasNoPurchases = !iapState.purchases || iapState.purchases.length === 0;
-            
-            // Initialize IAP if not already initialized
-            if (!iapState.isInitialized) {
-                const initialized = await iapStore.initialize();
-                if (initialized) {
-                    iapStore.setupPurchaseListener();
-                }
+            if (!authState.user?.id) {
+                throw new Error('No authenticated user found');
             }
             
-            // Restore purchases if cache is expired or no purchases exist
-            if (isCacheExpired || hasNoPurchases) {
-                await iapStore.restorePurchases("inapp");
-                // Only restore in-app purchases, not subscriptions
-            }
+            const freshPurchases = await getUserIAPTransactions(authState.user.id);
+            purchases = freshPurchases;
+            computeDisplayData(freshPurchases);
+            setCachedPurchases(freshPurchases, authState.user.id);
+            isInitialized = true;
         } catch (err) {
-            console.error("Failed to initialize IAP:", err);
-            error = err instanceof Error ? err.message : "Failed to initialize";
-            toast.error("Failed to initialize purchase system");
+            console.error('Failed to load purchase history:', err);
+            error = err instanceof Error ? err.message : 'Failed to load purchase history';
         } finally {
             loading = false;
+            showLoading = false;
         }
     }
 
-    function getProductInfo(productId: string) {
-        // First try to get from store products (has actual pricing)
+    function getProductInfo(productId: string, purchase?: IAPTransactionRecord) {
+        // First priority: Use stored pricing from original_json (no flashing)
+        const originalData = purchase?.original_json;
+        if (originalData?.formattedPrice && originalData?.priceCurrencyCode) {
+            const consumable = iapProductConfig.consumables.find((p) => p.id === productId);
+            const subscription = iapProductConfig.subscriptions.find((p) => p.id === productId);
+            
+            return {
+                name: consumable ? `${consumable.tokens} tokens` : (subscription?.name || productId),
+                price: originalData.formattedPrice,
+                priceValue: parseFloat(originalData.formattedPrice.replace(/[^0-9.]/g, '')) || 0,
+                emoji: consumable?.emoji || subscription?.emoji || "📦",
+                type: consumable ? "consumable" : (subscription ? "subscription" : "unknown"),
+                currency: originalData.priceCurrencyCode,
+            };
+        }
+
+        // Second priority: Try to get from store products (has actual pricing)
         const storeProduct = iapState.products?.find((p: any) => p.productId === productId);
-        if (storeProduct) {
-            // Check if it's a consumable or subscription for proper naming
+        if (storeProduct && storeProduct.formattedPrice) {
             const consumable = iapProductConfig.consumables.find((p) => p.id === productId);
             const subscription = iapProductConfig.subscriptions.find((p) => p.id === productId);
             
             return {
                 name: consumable ? `${consumable.tokens} tokens` : (subscription?.name || storeProduct.title),
                 price: storeProduct.formattedPrice,
-                priceValue: storeProduct.price, // Numeric value for calculations
+                priceValue: parseFloat(storeProduct.formattedPrice.replace(/[^0-9.]/g, '')) || 0,
                 emoji: consumable?.emoji || subscription?.emoji || "📦",
                 type: consumable ? "consumable" : (subscription ? "subscription" : "unknown"),
-                currency: storeProduct.priceCurrencyCode,
+                currency: storeProduct.priceCurrencyCode || "USD",
             };
         }
 
-        // Fallback to config data if product not loaded from store
+        // Fallback to config data if no stored or store pricing available
         const consumable = iapProductConfig.consumables.find((p) => p.id === productId);
         if (consumable) {
             return {
@@ -149,47 +288,6 @@
             return "Invalid date";
         }
     }
-
-    function getPurchaseStatus(purchaseState: number): string {
-        switch (purchaseState) {
-            case 0:
-                return "Completed";
-            case 1:
-                return "Canceled";
-            default:
-                return "Unknown";
-        }
-    }
-
-    function getStatusVariant(
-        purchaseState: number,
-    ): "default" | "secondary" | "destructive" {
-        switch (purchaseState) {
-            case 0:
-                return "default";
-            case 1:
-                return "destructive";
-            default:
-                return "secondary";
-        }
-    }
-
-    // Calculate total value of successful purchases
-    function calculateTotalValue(): string {
-        const successfulPurchases = purchases.filter((p) => p.purchaseState === 0);
-        let total = 0;
-        let currency = "USD";
-        
-        successfulPurchases.forEach((purchase) => {
-            const productInfo = getProductInfo(purchase.productId);
-            total += productInfo.priceValue || 0;
-            if (productInfo.currency && productInfo.currency !== "USD") {
-                currency = productInfo.currency;
-            }
-        });
-        
-        return `$${total.toFixed(2)} ${currency}`;
-    }
 </script>
 
 <AppLayout
@@ -198,14 +296,16 @@
     onBack={goBack}
     maxWidth="max-w-4xl"
 >
-    {#if loading}
-        <!-- Loading state -->
+    {#if showLoading}
+        <!-- Loading state - only show when no cached data -->
         <div class="flex justify-center items-center py-12">
             <div
                 class="w-8 h-8 border-4 border-primary/20 border-t-primary rounded-full animate-spin"
             ></div>
         </div>
-    {:else if error}
+    {/if}
+    
+    {#if error}
         <!-- Error state -->
         <Card class="mb-6">
             <CardContent class="pt-6">
@@ -231,7 +331,7 @@
                         </div>
                     </div>
                     <Button
-                        onclick={() => initializeIAPIfNeeded()}
+                        onclick={() => loadPurchaseHistory()}
                         variant="outline"
                     >
                         Try Again
@@ -239,7 +339,9 @@
                 </div>
             </CardContent>
         </Card>
-    {:else if purchases.length === 0}
+    {/if}
+    
+    {#if showContent && purchases.length === 0}
         <!-- Empty state -->
         <Card class="mb-6">
             <CardContent class="pt-6">
@@ -260,26 +362,28 @@
                 </div>
             </CardContent>
         </Card>
-    {:else}
+    {/if}
+    
+    {#if showContent && purchases.length > 0}
         <!-- Summary card -->
         {#if purchases.length > 0}
             <Card class="mb-4">
                 <CardContent>
                     <div
-                        class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center"
+                        class="grid grid-cols-2 md:grid-cols-4 gap-4"
                     >
-                        <div>
-                            <div class="text-2xl font-bold text-primary">
-                                {purchases.filter((p) => p.purchaseState === 0)
+                        <div class="text-left">
+                            <div class="text-xl font-bold text-primary">
+                                {purchases.filter((p) => p.purchase_state === 0)
                                     .length}
                             </div>
                             <div class="text-sm text-muted-foreground">
                                 Total Purchases
                             </div>
                         </div>
-                        <div>
-                            <div class="text-2xl font-bold text-primary">
-                                {calculateTotalValue()}
+                        <div class="text-right">
+                            <div class="text-xl font-bold text-primary">
+                                {cachedTotalValue}
                             </div>
                             <div class="text-sm text-muted-foreground">
                                 Total Value
@@ -289,40 +393,32 @@
                 </CardContent>
             </Card>
         {/if}
-        <!-- Purchases list -->
+        <!-- Purchases list using cached display data -->
         <div class="space-y-3">
-            {#each purchases as purchase (purchase.purchaseToken)}
-                {@const productInfo = getProductInfo(purchase.productId)}
+            {#each cachedPurchaseDisplays as displayData (displayData.purchase.purchase_token)}
                 <Card>
-                    <CardContent class="px-4 py-2">
+                    <CardContent class="px-4">
                         <div class="flex items-center justify-between">
                             <div class="flex items-center gap-3">
-                                <div class="text-2xl">{productInfo.emoji}</div>
+                                <div class="text-2xl">{displayData.emoji}</div>
                                 <div>
                                     <div class="font-semibold text-foreground">
-                                        {productInfo.name}
+                                        {displayData.name}
                                     </div>
                                     <div class="text-sm text-muted-foreground">
-                                        {formatDate(purchase.purchaseTime)}
+                                        {displayData.formattedDate}
                                     </div>
                                 </div>
                             </div>
                             <div class="flex items-center gap-2 text-right">
                                 <div class="mr-2">
                                     <div class="font-semibold text-foreground">
-                                        {productInfo.price}
+                                        {displayData.price}
                                     </div>
                                     <div class="text-xs text-muted-foreground">
-                                        {productInfo.currency}
+                                        {displayData.currency}
                                     </div>
                                 </div>
-                                <Badge
-                                    variant={getStatusVariant(
-                                        purchase.purchaseState,
-                                    )}
-                                >
-                                    {getPurchaseStatus(purchase.purchaseState)}
-                                </Badge>
                             </div>
                         </div>
                     </CardContent>

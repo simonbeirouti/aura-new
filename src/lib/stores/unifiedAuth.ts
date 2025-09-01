@@ -3,6 +3,8 @@ import { createClient, type AuthSession, type User } from '@supabase/supabase-js
 import { sessionStore } from './sessionStore';
 import { dataActions } from './dataStore';
 import { storeManager } from './core/storeManager';
+import { userStore } from './userStore';
+import { syncSubscriptionsWithIAP } from '$lib/utils/iapDatabase';
 
 // Supabase client setup with better error handling
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -103,6 +105,7 @@ const initialState: UnifiedAuthState = {
 class UnifiedAuthStore {
   private store = writable<UnifiedAuthState>(initialState);
   private refreshTimer: NodeJS.Timeout | null = null;
+  private iapSyncTimer: NodeJS.Timeout | null = null;
 
   // Store subscription
   subscribe = this.store.subscribe;
@@ -117,13 +120,6 @@ class UnifiedAuthStore {
     this.store,
     $state => {
       const result = $state.isAuthenticated && $state.profile && $state.profile.onboarding_complete;
-      console.log('🔍 shouldShowApp check:', {
-        isAuthenticated: $state.isAuthenticated,
-        hasProfile: !!$state.profile,
-        profileLoaded: $state.profileLoaded,
-        onboardingComplete: $state.profile?.onboarding_complete,
-        result
-      });
       return result;
     }
   );
@@ -132,13 +128,6 @@ class UnifiedAuthStore {
     this.store,
     $state => {
       const result = $state.isAuthenticated && $state.profileLoaded && (!$state.profile || !$state.profile.onboarding_complete);
-      console.log('🔍 shouldShowOnboarding check:', {
-        isAuthenticated: $state.isAuthenticated,
-        profileLoaded: $state.profileLoaded,
-        hasProfile: !!$state.profile,
-        onboardingComplete: $state.profile?.onboarding_complete,
-        result
-      });
       return result;
     }
   );
@@ -179,7 +168,6 @@ class UnifiedAuthStore {
         try {
           await dataActions.initialize();
           const profile = await dataActions.getUserProfile(state.user.id, false);
-          console.log('📊 Profile loaded during initialization:', profile);
 
           this.store.update(s => ({
             ...s,
@@ -188,7 +176,6 @@ class UnifiedAuthStore {
           }));
           result.profileReady = !!profile;
         } catch (error) {
-          console.warn('⚠️ Failed to load profile:', error);
           result.errors.push(`Failed to load profile: ${error}`);
           this.store.update(s => ({ ...s, profileLoaded: true })); // Mark as loaded even if failed
         }
@@ -205,7 +192,6 @@ class UnifiedAuthStore {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('❌ Unified auth initialization failed:', error);
       result.errors.push(errorMessage);
 
       this.store.update(state => ({
@@ -235,21 +221,16 @@ class UnifiedAuthStore {
         const tokens = await sessionStore.getStoredTokens();
         if (tokens) {
           // Initialize Supabase client
-          const { createClient } = await import('@supabase/supabase-js');
-          const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-          const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-          
-          if (!supabaseUrl || !supabaseKey) {
+          if (!supabaseUrl || !supabaseAnonKey) {
             throw new Error('Missing Supabase configuration');
           }
           
-          const supabase = createClient(supabaseUrl, supabaseKey);
+          const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
           
           // Restore session if available
-          const { data: { session } } = await supabase.auth.getSession();
+          const { data: { session } } = await supabaseClient.auth.getSession();
           if (session) {
             await sessionStore.setAuthenticated(session.user, session);
-            console.log('Session restored successfully');
           }
         }
       }
@@ -267,7 +248,6 @@ class UnifiedAuthStore {
         return true;
       }
     } catch (error) {
-      console.error('Auth initialization failed:', error);
       await this.setUnauthenticated(
         error instanceof Error ? error.message : 'Authentication failed'
       );
@@ -293,7 +273,33 @@ class UnifiedAuthStore {
     }));
 
     // Store tokens securely in Tauri and session store
-    await sessionStore.setAuthenticated(user, session);
+    try {
+      await sessionStore.setAuthenticated(user, session);
+    } catch (error) {
+      throw new Error(`Database error saving new user: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+
+    // Wait a moment for session store to be fully written
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Initialize user store with authenticated user
+    try {
+      await userStore.initialize(user.id);
+    } catch (error) {
+      // For new users, this is expected - they don't have database records yet
+      // Don't fail authentication if user store initialization fails
+    }
+
+    // Load user profile data
+    try {
+      await this.refreshProfile();
+    } catch (error) {
+      // Don't fail authentication if profile loading fails
+      // This is expected for new users who haven't created a profile yet
+    }
+
+    // Start background IAP sync after authentication
+    this.startBackgroundIAPSync(user.id);
 
     // Start token refresh monitoring
     this.scheduleTokenRefresh();
@@ -303,10 +309,20 @@ class UnifiedAuthStore {
    * Set unauthenticated state
    */
   private async setUnauthenticated(error?: string): Promise<void> {
-    // Clear refresh timer
+    // Clear timers
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
+    }
+    if (this.iapSyncTimer) {
+      clearTimeout(this.iapSyncTimer);
+      this.iapSyncTimer = null;
+    }
+
+    // Reset user store
+    try {
+      userStore.reset();
+    } catch (error) {
     }
 
     this.store.update(state => ({
@@ -342,7 +358,7 @@ class UnifiedAuthStore {
 
     if (refreshTime > 0) {
       this.refreshTimer = setTimeout(() => {
-        this.refreshSession().catch(console.error);
+        this.refreshSession().catch(() => {});
       }, refreshTime);
     }
   }
@@ -356,13 +372,12 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase auth
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      const { data, error } = await supabase.auth.signUp({
+      const { data, error } = await supabaseClient.auth.signUp({
         email,
         password
       });
@@ -373,11 +388,9 @@ class UnifiedAuthStore {
       
       if (data.user && data.session) {
         await this.setAuthenticated(data.user, data.session);
-        console.log('Signup successful');
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Sign up failed';
-      console.error('Sign up failed:', error);
       this.store.update(state => ({
         ...state,
         error: errorMessage,
@@ -398,13 +411,12 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase auth
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      const { data, error } = await supabase.auth.signInWithPassword({
+      const { data, error } = await supabaseClient.auth.signInWithPassword({
         email,
         password
       });
@@ -415,11 +427,9 @@ class UnifiedAuthStore {
       
       if (data.user && data.session) {
         await this.setAuthenticated(data.user, data.session);
-        console.log('Login successful');
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Login failed';
-      console.error('Login failed:', error);
       this.store.update(state => ({
         ...state,
         error: errorMessage,
@@ -439,25 +449,26 @@ class UnifiedAuthStore {
 
     try {
       // Direct Supabase signout
-      const { createClient } = await import('@supabase/supabase-js');
-      const supabase = createClient(
+      const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      await supabase.auth.signOut();
+      await supabaseClient.auth.signOut();
       await sessionStore.setUnauthenticated();
     } catch (error) {
-      console.error('Logout failed:', error);
       // Force clear session even if Supabase signout fails
       try {
         await this.setUnauthenticated(
           error instanceof Error ? error.message : 'Logout failed'
         );
       } catch (sessionError) {
-        console.error('Failed to clear session:', sessionError);
         // Last resort: manually clear Supabase session
-        await supabase.auth.signOut({ scope: 'local' });
+        const fallbackClient = createClient(
+          import.meta.env.VITE_SUPABASE_URL,
+          import.meta.env.VITE_SUPABASE_ANON_KEY
+        );
+        await fallbackClient.auth.signOut({ scope: 'local' });
       }
     } finally {
       this.store.update(state => ({ ...state, isLoading: false }));
@@ -479,7 +490,6 @@ class UnifiedAuthStore {
         await this.setAuthenticated(data.user, data.session);
       }
     } catch (error) {
-      console.error('Session refresh failed:', error);
       // If refresh fails, logout
       await this.handleLogout();
       throw error;
@@ -501,7 +511,7 @@ class UnifiedAuthStore {
 
       this.store.update(s => ({ ...s, profile, profileLoaded: true }));
     } catch (error) {
-      console.error('Failed to refresh profile:', error);
+      throw error;
     }
   }
 
@@ -570,12 +580,49 @@ class UnifiedAuthStore {
   }
 
   /**
+   * Start background IAP synchronization
+   */
+  private startBackgroundIAPSync(userId: string): void {
+    // Clear existing timer
+    if (this.iapSyncTimer) {
+      clearTimeout(this.iapSyncTimer);
+    }
+
+    // Initial sync after 10 seconds to allow IAP store to initialize
+    setTimeout(async () => {
+      try {
+        await syncSubscriptionsWithIAP(userId);
+      } catch (error) {
+      }
+    }, 10000);
+
+    // Set up periodic sync every 3 minutes
+    const syncInterval = () => {
+      this.iapSyncTimer = setTimeout(async () => {
+        try {
+          await syncSubscriptionsWithIAP(userId);
+        } catch (error) {
+        }
+        // Schedule next sync
+        syncInterval();
+      }, 3 * 60 * 1000); // 3 minutes
+    };
+
+    // Start the interval
+    syncInterval();
+  }
+
+  /**
    * Destroy store and cleanup
    */
   destroy(): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
+    }
+    if (this.iapSyncTimer) {
+      clearTimeout(this.iapSyncTimer);
+      this.iapSyncTimer = null;
     }
   }
 }

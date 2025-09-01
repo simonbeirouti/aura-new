@@ -4,6 +4,10 @@ mod session;
 mod database;
 // Enhanced store management module
 mod enhanced_store;
+// IAP database management module
+mod iap_database;
+// Purchases management module
+mod purchases;
 
 use serde::{Deserialize, Serialize};
 
@@ -35,75 +39,13 @@ fn get_platform_info() -> PlatformInfo {
     }
 }
 
-// Import required for environment variable loading
-#[cfg(not(target_os = "ios"))]
-use dotenv;
-
-// Load environment variables with cross-platform handling
-fn load_environment_variables() {
-    #[cfg(debug_assertions)]
-    println!("Loading environment variables for cross-platform compatibility");
-    
-    // On desktop platforms, try to load .env file at runtime
-    #[cfg(not(target_os = "ios"))]
-    {
-        let env_paths = [
-            ".env",           // Current directory
-            "../.env",        // Parent directory (common for Tauri apps)
-            "../../.env",     // Two levels up
-            "src-tauri/.env", // From project root
-        ];
-        
-        let mut loaded = false;
-        
-        // Try each path until one works
-        for path in &env_paths {
-            if let Ok(_) = dotenv::from_path(path) {
-                #[cfg(debug_assertions)]
-                println!("Loaded runtime environment variables from: {}", path);
-                loaded = true;
-                break;
-            }
-        }
-        
-        if !loaded {
-            #[cfg(debug_assertions)]
-            println!("No .env file found at runtime, using compile-time variables");
-        }
-    }
-    
-    // On iOS and other mobile platforms, rely on compile-time variables
-    #[cfg(target_os = "ios")]
-    {
-        #[cfg(debug_assertions)]
-        println!("iOS platform detected - using compile-time environment variables");
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Load environment variables from .env file with platform-specific handling
-    load_environment_variables();
-    
+pub fn run() {    
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_opener::init());
-    
-    // Enable IAP plugin for mobile platforms
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    {
-        builder = builder.plugin(tauri_plugin_iap::init());
-        #[cfg(debug_assertions)]
-        println!("IAP plugin enabled for mobile platform");
-    }
-    
-    // Disable IAP plugin for desktop platforms to prevent Swift concurrency crashes
-    #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    {
-        #[cfg(debug_assertions)]
-        println!("IAP plugin disabled on desktop platforms to prevent Swift concurrency crashes");
-    }
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_iap::init());
     
     builder
         .invoke_handler(tauri::generate_handler![
@@ -133,7 +75,22 @@ pub fn run() {
             enhanced_store::store_restore,
             enhanced_store::store_sync,
             enhanced_store::store_validate,
-            enhanced_store::store_health
+            enhanced_store::store_health,
+            // IAP database management commands
+            iap_database::save_iap_transaction,
+            iap_database::save_user_subscription,
+            iap_database::save_token_transaction,
+            iap_database::get_user_token_balance,
+            iap_database::get_user_subscriptions,
+            iap_database::check_transaction_exists,
+            iap_database::update_subscription_data,
+            iap_database::update_subscription_status,
+            iap_database::get_user_iap_transactions,
+            // Purchase management commands
+            purchases::get_products,
+            purchases::purchase_product,
+            purchases::get_user_purchases,
+            purchases::can_purchase_product
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

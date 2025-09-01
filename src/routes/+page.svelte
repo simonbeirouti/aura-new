@@ -1,288 +1,144 @@
 <script lang="ts">
-  import { animate, stagger } from "animejs";
-  import {
-    Card,
-    CardContent,
-    CardHeader,
-    CardTitle,
-  } from "$lib/components/ui/card";
-  import { Button } from "$lib/components/ui/button";
   import AppLayout from "$lib/components/AppLayout.svelte";
+  import { onMount } from 'svelte';
+  import { userStore } from '$lib/stores/userStore';
+  import { formattedAvailableTokens } from '$lib/stores/userStore';
+  import { 
+    purchaseManager, 
+    products, 
+    productsLoading, 
+    productsError, 
+    purchaseLoading 
+  } from '$lib/stores/purchaseStore';
+  import { toast } from 'svelte-sonner';
 
-  function playBounceAnimation() {
-    animate(".bounce-target", {
-      translateY: [-20, 0],
-      duration: 600,
-      easing: "easeOutBounce",
-    });
+  onMount(async () => {
+    await purchaseManager.loadProducts();
+  });
+
+  async function loadProducts() {
+    await purchaseManager.loadProducts(true); // Force refresh
   }
 
-  function playRotationAnimation() {
-    animate(".rotate-target", {
-      rotate: "360deg",
-      duration: 1000,
-      easing: "easeInOutQuad",
-    });
+  async function purchaseProduct(productId: string) {
+    const userId = $userStore.userId;
+    if (!userId) {
+      toast.error('Please log in to make a purchase');
+      return;
+    }
+    
+    try {
+      const result = await purchaseManager.purchaseProduct(productId, userId);
+      
+      // Immediately update token balance without database call
+      userStore.updateTokenBalanceAfterPurchase(result.newTokenBalance.tokenCost);
+      
+      // Show success toast
+      const product = purchaseManager.getProduct(productId);
+      toast.success(`Successfully purchased ${product?.name || 'product'}!`);
+    } catch (err) {
+      // Show error toast instead of inline error
+      const errorMessage = err instanceof Error ? err.message : 'Purchase failed';
+      toast.error(errorMessage);
+      console.error('Purchase failed:', err);
+    }
   }
 
-  function playStaggerAnimation() {
-    animate(".stagger-item", {
-      scale: [0, 1],
-      opacity: [0, 1],
-      duration: 600,
-      delay: stagger(100),
-      easing: "easeOutBack",
-    });
-  }
-
-  function playPathAnimation() {
-    animate(".path-target", {
-      translateX: [0, 200],
-      translateY: [0, -100, 0],
-      rotate: [0, 180, 360],
-      duration: 2000,
-      easing: "easeInOutSine",
-      loop: true,
-      direction: "alternate",
-    });
-  }
-
-  function playTimeline() {
-    // Simple, working timeline animation
-    animate(".hero-title", {
-      opacity: [0, 1],
-      scale: [0.75, 1],
-      duration: 1000,
-      easing: "easeOutQuad",
-    });
-
-    animate(".hero-subtitle", {
-      opacity: [0, 1],
-      translateY: [8, 0],
-      duration: 800,
-      delay: 400,
-      easing: "easeOutQuad",
-    });
-
-    // Animate the progress bar
-    animate(".timeline-progress", {
-      width: ["0%", "100%"],
-      duration: 1400, // Slightly longer than the text animations
-      easing: "easeOutQuad",
-    });
-  }
 </script>
 
-<svelte:head>
-  <title>Anime.js Testing - Aura</title>
-</svelte:head>
-
-<AppLayout maxWidth="max-w-6xl">
-  <!-- Animation Cards Grid -->
-  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-    <!-- Bounce Card -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Bounce Effect</CardTitle>
-      </CardHeader>
-      <CardContent class="text-center">
-        <div
-          class="bounce-target w-20 h-20 bg-primary rounded-full mx-auto flex items-center justify-center text-primary-foreground text-2xl shadow-lg"
-        >
-          🎯
+<AppLayout>
+  <div class="container mx-auto">
+    <!-- Header Section -->
+    <div class="text-center mb-12">
+      <h1 class="text-4xl font-bold mb-4">Welcome to Aura Store</h1>
+      <p class="text-muted-foreground text-lg mb-6">
+        Enhance your experience with premium features and upgrades
+      </p>
+      
+      <!-- Token Balance Display -->
+      {#if $userStore.isInitialized}
+        <div class="inline-flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full">
+          <span class="text-2xl">🪙</span>
+          <span class="font-semibold">{$formattedAvailableTokens} tokens available</span>
         </div>
-        <p class="mt-4 text-sm text-muted-foreground">
-          Click the bounce button to see this element bounce!
-        </p>
-        <Button class="mt-4" onclick={playBounceAnimation}>🎯 Bounce</Button>
-      </CardContent>
-    </Card>
+      {/if}
+    </div>
 
-    <!-- Rotation Card -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Rotation</CardTitle>
-      </CardHeader>
-      <CardContent class="text-center">
-        <div
-          class="rotate-target w-20 h-20 bg-secondary rounded-lg mx-auto flex items-center justify-center text-secondary-foreground text-2xl shadow-lg"
-        >
-          🔄
-        </div>
-        <p class="mt-4 text-sm text-muted-foreground">
-          Click rotation to spin this element!
-        </p>
-        <Button
-          class="mt-4"
-          variant="secondary"
-          onclick={playRotationAnimation}
-        >
-          🔄 Rotate
-        </Button>
-      </CardContent>
-    </Card>
+    <!-- Loading State -->
+    {#if $productsLoading}
+      <div class="text-center py-12">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
+        <p class="text-muted-foreground">Loading products...</p>
+      </div>
+    {/if}
 
-    <!-- Stagger Card -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Stagger Effect</CardTitle>
-      </CardHeader>
-      <CardContent class="text-center">
-        <div class="flex justify-center gap-2">
-          <div
-            class="stagger-item w-8 h-8 bg-accent rounded-full flex items-center justify-center text-accent-foreground text-xs shadow-sm"
+    <!-- Error State -->
+    {#if $productsError}
+      <div class="text-center py-12">
+        <div class="bg-destructive/10 text-destructive p-4 rounded-lg max-w-md mx-auto">
+          <p class="font-semibold mb-2">Failed to load products</p>
+          <p class="text-sm">{$productsError}</p>
+          <button 
+            onclick={loadProducts}
+            class="mt-4 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
           >
-            1
-          </div>
-          <div
-            class="stagger-item w-8 h-8 bg-accent rounded-full flex items-center justify-center text-accent-foreground text-xs shadow-sm"
-          >
-            2
-          </div>
-          <div
-            class="stagger-item w-8 h-8 bg-accent rounded-full flex items-center justify-center text-accent-foreground text-xs shadow-sm"
-          >
-            3
-          </div>
-          <div
-            class="stagger-item w-8 h-8 bg-accent rounded-full flex items-center justify-center text-accent-foreground text-xs shadow-sm"
-          >
-            4
-          </div>
+            Try Again
+          </button>
         </div>
-        <p class="mt-4 text-sm text-muted-foreground">
-          Watch them appear one by one!
-        </p>
-        <Button class="mt-4" variant="outline" onclick={playStaggerAnimation}>
-          ⚡ Stagger
-        </Button>
-      </CardContent>
-    </Card>
+      </div>
+    {/if}
 
-    <!-- Path Animation Card -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Path Animation</CardTitle>
-      </CardHeader>
-      <CardContent class="text-center">
-        <div
-          class="relative h-32 bg-muted rounded-lg overflow-hidden border border-border"
-        >
-          <div
-            class="path-target w-8 h-8 bg-destructive rounded-full absolute top-1/2 left-4 transform -translate-y-1/2 shadow-lg"
-          >
-            🚀
-          </div>
-        </div>
-        <p class="mt-4 text-sm text-muted-foreground">
-          This element follows a custom path!
-        </p>
-        <Button class="mt-4" variant="destructive" onclick={playPathAnimation}>
-          🛤️ Animate Path
-        </Button>
-      </CardContent>
-    </Card>
-
-    <!-- Timeline Card -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Timeline</CardTitle>
-      </CardHeader>
-      <CardContent class="text-center">
-        <div class="space-y-2">
-          <div
-            class="w-full h-3 bg-muted rounded-full overflow-hidden border border-border"
-          >
-            <div
-              class="timeline-progress h-full bg-primary rounded-full"
-              style="width: 0%"
-            ></div>
-          </div>
-        </div>
-        <div
-          class="hero-subtitle opacity-0 translate-y-2 text-sm text-muted-foreground transform transition-all"
-        >
-          Watch the coordinated animation
-        </div>
-        <Button class="mt-4" onclick={playTimeline} variant="outline" size="sm">
-          🎬 Play Timeline
-        </Button>
-      </CardContent>
-    </Card>
-
-    <!-- Interactive Demo Section -->
-    <Card
-      class="border-border bg-card text-card-foreground shadow-sm transition-all duration-200 hover:shadow-md"
-    >
-      <CardHeader>
-        <CardTitle class="text-center">Interactive Demo</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div class="text-center space-y-4">
-          <p class="text-muted-foreground">
-            Try clicking this element to trigger an animation:
-          </p>
-          <Button
-            class="w-24 h-24 mx-auto"
-            variant="outline"
-            onclick={(event) => {
-              if (event.target) {
-                animate(event.target, {
-                  scale: [1, 1.2, 1],
-                  rotate: [0, 10, -10, 0],
-                  duration: 600,
-                  easing: "easeInOutQuad",
-                });
-              }
-            }}
-            onkeydown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                if (event.target) {
-                  animate(event.target, {
-                    scale: [1, 1.2, 1],
-                    rotate: [0, 10, -10, 0],
-                    duration: 600,
-                    easing: "easeInOutQuad",
-                  });
-                }
-              }
-            }}
-            aria-label="Click to trigger animation"
-            type="button"
-          >
-            <div
-              class="w-full h-full flex items-center justify-center text-3xl"
-            >
-              🎮
+    <!-- Products Grid -->
+    {#if !$productsLoading && !$productsError && $products.length > 0}
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+        {#each $products as product}
+          <div class="bg-card border rounded-lg p-4 md:p-6 hover:shadow-lg transition-shadow text-center">
+            <!-- Product Header -->
+            <div class="mb-3">
+              <h3 class="font-semibold text-base md:text-lg mb-2">{product.name}</h3>
             </div>
-          </Button>
-          <p class="text-sm text-muted-foreground">
-            Click to trigger a quick animation!
-          </p>
-        </div>
-      </CardContent>
-    </Card>
+
+            <!-- Product Description -->
+            <p class="text-muted-foreground text-xs md:text-sm mb-4 md:mb-6 leading-relaxed">
+              {product.description}
+            </p>
+
+            <!-- Purchase Button -->
+            <div class="space-y-2">
+              <button
+                onclick={() => purchaseProduct(product.id)}
+                disabled={$purchaseLoading[product.id] || !userStore.hasSufficientTokens(product.token_cost)}
+                class="w-full px-2 py-2 md:px-4 text-xs md:text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1 md:gap-2"
+              >
+                {#if $purchaseLoading[product.id]}
+                  <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"></div>
+                  <span>Purchasing...</span>
+                {:else if !userStore.hasSufficientTokens(product.token_cost)}
+                  <span>Insufficient Tokens</span>
+                {:else}
+                  <span>🪙</span>
+                  <span>{product.token_cost} tokens</span>
+                {/if}
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    <!-- Empty State -->
+    {#if !$productsLoading && !$productsError && $products.length === 0}
+      <div class="text-center py-12">
+        <div class="text-6xl mb-4">🛍️</div>
+        <h3 class="text-xl font-semibold mb-2">No products available</h3>
+        <p class="text-muted-foreground mb-6">Check back later for new items!</p>
+        <button 
+          onclick={loadProducts}
+          class="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+    {/if}
   </div>
 </AppLayout>
-
-<style>
-  /* Custom styles for better animation performance */
-  .bounce-target,
-  .rotate-target,
-  .stagger-item,
-  .path-target,
-  .hero-subtitle {
-    will-change: transform;
-  }
-</style>
