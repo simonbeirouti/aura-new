@@ -10,6 +10,8 @@ mod iap_database;
 mod purchases;
 // Biometric store management module
 mod biometric_store;
+// Notifications management module
+mod notifications;
 
 use serde::{Deserialize, Serialize};
 
@@ -47,10 +49,15 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_iap::init())
         .setup(|app| {
             #[cfg(mobile)]
             let _ = app.handle().plugin(tauri_plugin_biometric::init());
+            
+            // Setup notification handlers
+            let _ = notifications::setup_notification_handlers(&app.handle());
+            
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -102,7 +109,14 @@ pub fn run() {
             biometric_store::check_biometric_availability,
             biometric_store::authenticate_biometric,
             biometric_store::set_biometric_enabled,
-            biometric_store::should_authenticate_on_startup
+            biometric_store::should_authenticate_on_startup,
+            // Notification management commands
+            notifications::request_notification_permission,
+            notifications::send_notification,
+            notifications::send_action_notification,
+            notifications::register_action_types,
+            notifications::get_notification_settings,
+            notifications::update_notification_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

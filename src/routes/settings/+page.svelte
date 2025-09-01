@@ -61,7 +61,7 @@
 
     // Navigation items array with title and link
     const navigationItems = [
-        { title: "Security", link: "/settings/security", icon: ShieldIcon },
+        { title: "Security & Notifications", link: "/settings/security-notifications", icon: ShieldIcon },
         { title: "Purchase History", link: "/settings/purchases", icon: HistoryIcon },
         { title: "Subscription", link: "/settings/subscription", icon: CrownIcon }
     ];

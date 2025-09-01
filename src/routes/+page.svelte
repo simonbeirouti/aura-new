@@ -11,9 +11,31 @@
     purchaseLoading 
   } from '$lib/stores/purchaseStore';
   import { toast } from 'svelte-sonner';
+  import { 
+    notificationActions, 
+    initializeCommonActionTypes,
+    commonActionTypes 
+  } from '$lib/stores/notificationStore';
+  import { listen } from '@tauri-apps/api/event';
+
+  let permissionGranted = false;
+  let actionTypesInitialized = false;
 
   onMount(async () => {
     await purchaseManager.loadProducts();
+    
+    // Initialize notification system
+    try {
+      await notificationActions.initializeListeners();
+      permissionGranted = await notificationActions.requestPermission();
+      
+      if (permissionGranted) {
+        await initializeCommonActionTypes();
+        actionTypesInitialized = true;
+      }
+    } catch (error) {
+      console.error('Failed to initialize notifications:', error);
+    }
   });
 
   async function loadProducts() {
@@ -44,6 +66,64 @@
     }
   }
 
+
+  async function sendMessageNotification() {
+    try {
+      await notificationActions.sendActionNotification(
+        "New Message",
+        "You have a new message from John Doe. Tap to reply or mark as read.",
+        "messages"
+      );
+      toast.success("Message notification with actions sent");
+    } catch (error) {
+      toast.error("Failed to send message notification");
+      console.error('Message notification error:', error);
+    }
+  }
+
+  async function sendReminderNotification() {
+    try {
+      await notificationActions.sendActionNotification(
+        "Task Reminder",
+        "Don't forget to complete your daily standup meeting.",
+        "reminders"
+      );
+      toast.success("Reminder notification with actions sent");
+    } catch (error) {
+      toast.error("Failed to send reminder notification");
+      console.error('Reminder notification error:', error);
+    }
+  }
+
+  async function requestNotificationPermission() {
+    try {
+      permissionGranted = await notificationActions.requestPermission();
+      if (permissionGranted) {
+        await initializeCommonActionTypes();
+        actionTypesInitialized = true;
+        toast.success("Notification permission granted!");
+      } else {
+        toast.error("Notification permission denied");
+      }
+    } catch (error) {
+      toast.error("Failed to request permission");
+      console.error('Permission request error:', error);
+    }
+  }
+
+  async function sendInstantNotification() {
+    try {
+      await notificationActions.sendNotification(
+        "Instant Notification",
+        "This notification appeared immediately!"
+      );
+      toast.success("Instant notification sent");
+    } catch (error) {
+      toast.error("Failed to send notification");
+      console.error('Instant notification error:', error);
+    }
+  }
+
 </script>
 
 <AppLayout>
@@ -62,8 +142,82 @@
           <span class="font-semibold">{$formattedAvailableTokens} tokens available</span>
         </div>
       {/if}
+
+      <!-- Notification Test Section -->
+      <div class="mt-8 p-6 bg-card border rounded-lg max-w-2xl mx-auto">
+        <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
+          <span>🔔</span>
+          Test Notifications
+        </h3>
+        
+        {#if !permissionGranted}
+          <div class="text-center mb-4">
+            <p class="text-sm text-muted-foreground mb-3">
+              Permission required to send notifications
+            </p>
+            <button
+              onclick={requestNotificationPermission}
+              class="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+            >
+              Request Permission
+            </button>
+          </div>
+        {:else}
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <!-- Basic Notifications -->
+            <div class="space-y-3">
+              <h4 class="text-sm font-medium text-muted-foreground">Basic Notifications</h4>
+              
+              <button
+                onclick={sendInstantNotification}
+                class="w-full px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors text-sm"
+              >
+                Send Instant Notification
+              </button>
+            </div>
+
+            <!-- Action Notifications -->
+            <div class="space-y-3">
+              <h4 class="text-sm font-medium text-muted-foreground">Interactive Notifications</h4>
+              
+              <button
+                onclick={sendMessageNotification}
+                disabled={!actionTypesInitialized}
+                class="w-full px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors disabled:opacity-50 text-sm"
+              >
+                Message with Reply
+              </button>
+
+              <button
+                onclick={sendReminderNotification}
+                disabled={!actionTypesInitialized}
+                class="w-full px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors disabled:opacity-50 text-sm"
+              >
+                Task Reminder
+              </button>
+            </div>
+          </div>
+
+          {#if actionTypesInitialized}
+            <div class="mt-4 p-3 bg-muted/50 rounded-md">
+              <p class="text-xs text-muted-foreground mb-2">Registered Action Types:</p>
+              <div class="flex flex-wrap gap-2">
+                {#each commonActionTypes as actionType}
+                  <span class="px-2 py-1 bg-primary/10 text-primary text-xs rounded">
+                    {actionType.id} ({actionType.actions.length} actions)
+                  </span>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/if}
+      </div>
     </div>
 
+    <!-- Products Section -->
+    <div class="mt-12">
+      <h2 class="text-2xl font-bold text-center mb-8">Available Products</h2>
+    
     <!-- Loading State -->
     {#if $productsLoading}
       <div class="text-center py-12">

@@ -9,6 +9,7 @@
     "store:default",
     "http:default",
     "iap:default",
-    "biometric:default"
+    "biometric:default",
+    "notification:default"
   ]
 }
