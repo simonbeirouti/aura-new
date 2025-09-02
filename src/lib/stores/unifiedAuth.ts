@@ -1,5 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import { createClient, type AuthSession, type User } from '@supabase/supabase-js';
+import { goto } from '$app/navigation';
 import { sessionStore } from './sessionStore';
 import { dataActions } from './dataStore';
 import { storeManager } from './core/storeManager';
@@ -445,34 +446,46 @@ class UnifiedAuthStore {
    * Handle user logout
    */
   async handleLogout(): Promise<void> {
-    // loadingActions.showAuth('Signing you out...');
-
+    // Always force complete logout regardless of errors
     try {
-      // Direct Supabase signout
+      // Step 1: Clear Supabase session
       const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
       
-      await supabaseClient.auth.signOut();
+      // Try both global and local signout
+      await Promise.allSettled([
+        supabaseClient.auth.signOut(),
+        supabaseClient.auth.signOut({ scope: 'local' })
+      ]);
+    } catch (error) {
+      // Ignore Supabase errors - we'll force cleanup anyway
+      console.warn('Supabase signout failed, forcing local cleanup:', error);
+    }
+
+    try {
+      // Step 2: Clear session store
       await sessionStore.setUnauthenticated();
     } catch (error) {
-      // Force clear session even if Supabase signout fails
-      try {
-        await this.setUnauthenticated(
-          error instanceof Error ? error.message : 'Logout failed'
-        );
-      } catch (sessionError) {
-        // Last resort: manually clear Supabase session
-        const fallbackClient = createClient(
-          import.meta.env.VITE_SUPABASE_URL,
-          import.meta.env.VITE_SUPABASE_ANON_KEY
-        );
-        await fallbackClient.auth.signOut({ scope: 'local' });
-      }
-    } finally {
-      this.store.update(state => ({ ...state, isLoading: false }));
+      console.warn('Session store cleanup failed:', error);
     }
+
+    // Step 3: Force clear all auth state (always runs)
+    await this.setUnauthenticated();
+    
+    // Step 4: Navigate to root and final cleanup
+    try {
+      await goto('/');
+    } catch (error) {
+      console.warn('Navigation failed during logout:', error);
+    }
+    
+    this.store.update(state => ({ 
+      ...state, 
+      isLoading: false,
+      isInitialized: true // Keep initialized to prevent re-init loops
+    }));
   }
 
   /**

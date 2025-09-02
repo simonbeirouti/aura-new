@@ -15,6 +15,7 @@
     import { Button } from "../ui/button";
     import { Input } from "../ui/input";
     import { Badge } from "../ui/badge";
+    import { loadingActions } from "../../stores/loadingStore";
 
     const dispatch = createEventDispatcher();
 
@@ -22,6 +23,8 @@
     let isSaving = false;
     let isUploading = false;
     let avatarPreview = "";
+    let isLoading = true;
+    let loadingError: string | null = null;
 
     // Profile form data (for authenticated users)
     let profileData = {
@@ -35,27 +38,36 @@
 
     // Initialize profile data when component mounts
     onMount(async () => {
-        if ($centralizedAuth.user) {
-            // Initialize from user metadata if available
-            profileData.full_name = $centralizedAuth.user.user_metadata?.full_name || "";
-            profileData.avatar_url = $centralizedAuth.user.user_metadata?.avatar_url || "";
-            
-            // Try to load existing profile data
-            try {
-                const existingProfile = await dataStore.getUserProfile($centralizedAuth.user.id);
-                if (existingProfile) {
-                    profileData.full_name = existingProfile.full_name || profileData.full_name;
-                    profileData.username = existingProfile.username || "";
-                    profileData.avatar_url = existingProfile.avatar_url || profileData.avatar_url;
+        loadingActions.showProfile();
+        
+        try {
+            if ($centralizedAuth.user) {
+                // Initialize from user metadata if available
+                profileData.full_name = $centralizedAuth.user.user_metadata?.full_name || "";
+                profileData.avatar_url = $centralizedAuth.user.user_metadata?.avatar_url || "";
+                
+                // Try to load existing profile data
+                try {
+                    const existingProfile = await dataStore.getUserProfile($centralizedAuth.user.id);
+                    if (existingProfile) {
+                        profileData.full_name = existingProfile.full_name || profileData.full_name;
+                        profileData.username = existingProfile.username || "";
+                        profileData.avatar_url = existingProfile.avatar_url || profileData.avatar_url;
+                    }
+                } catch (error) {
+                    // No existing profile found, will start with fresh data
                 }
-            } catch (error) {
-                // No existing profile found, will start with fresh data
+                
+                // Set avatar preview if we have an avatar URL
+                if (profileData.avatar_url) {
+                    avatarPreview = profileData.avatar_url;
+                }
             }
-            
-            // Set avatar preview if we have an avatar URL
-            if (profileData.avatar_url) {
-                avatarPreview = profileData.avatar_url;
-            }
+        } catch (error) {
+            loadingError = error instanceof Error ? error.message : "Failed to load profile data";
+        } finally {
+            isLoading = false;
+            loadingActions.hideProfile();
         }
     });
 
@@ -236,6 +248,18 @@
 
 <!-- Full Screen Profile Setup Layout -->
 <div class="min-h-screen bg-background flex flex-col overflow-hidden">
+    {#if isLoading}
+        <!-- Let GlobalLoading handle this state -->
+        {#if loadingError}
+            <div class="flex-1 flex flex-col items-center justify-center px-6">
+                <div class="text-center max-w-sm">
+                    <div class="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+                        <p class="text-sm text-destructive">{loadingError}</p>
+                    </div>
+                </div>
+            </div>
+        {/if}
+    {:else}
     <!-- Header Section -->
     <div class="flex flex-col items-center text-center pt-8 pb-4 px-6">
         <div class="flex justify-center mb-2">
@@ -342,4 +366,5 @@
             </Button>
         </div>
     </div>
+    {/if}
 </div>

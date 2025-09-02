@@ -166,7 +166,6 @@
                     email.trim(),
                     password.trim(),
                 );
-                toast.success("Welcome back!");
                 // For login, dispatch success immediately since they're authenticated
                 dispatch("authSuccess");
             }

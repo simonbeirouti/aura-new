@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from "svelte";
     import { centralizedAuth } from "../stores/unifiedAuth";
+    import { loadingActions } from "../stores/loadingStore";
     import OnboardingIntro from "./onboarding/OnboardingIntro.svelte";
     import OnboardingSecurity from "./onboarding/OnboardingSecurity.svelte";
     import OnboardingAuth from "./onboarding/OnboardingAuth.svelte";
@@ -13,6 +14,16 @@
     let currentStep = $state(1);
     const totalSteps = 4;
     
+    // Access derived stores from auth store
+    const shouldShowOnboarding = centralizedAuth.shouldShowOnboarding;
+    const shouldShowLogin = centralizedAuth.shouldShowLogin;
+    
+    // Derived visibility logic using Svelte 5 syntax
+    const shouldShow = $derived($shouldShowOnboarding || $shouldShowLogin);
+    const isAuthenticated = $derived($centralizedAuth.isAuthenticated);
+    const hasProfile = $derived($centralizedAuth.profile);
+    const onboardingComplete = $derived(hasProfile?.onboarding_complete);
+    
     // Check if user is already authenticated on mount
     onMount(() => {
         // If user is already authenticated but hasn't completed onboarding, go to profile step
@@ -23,6 +34,32 @@
                 // User is authenticated but needs to complete profile setup
                 currentStep = 4;
             }
+        } else {
+            // User is not authenticated, reset to start of onboarding
+            currentStep = 1;
+        }
+    });
+    
+    // Watch for authentication state changes to reset step when user logs out
+    $effect(() => {
+        if (!$centralizedAuth.isAuthenticated && !$centralizedAuth.user) {
+            currentStep = 1;
+        }
+    });
+    
+    // Derived state to check if we're waiting for profile data
+    const isWaitingForProfile = $derived(
+        $centralizedAuth.isAuthenticated && 
+        $centralizedAuth.user && 
+        !$centralizedAuth.profileLoaded
+    );
+    
+    // Use GlobalLoading for profile loading state
+    $effect(() => {
+        if (isWaitingForProfile) {
+            loadingActions.showProfile();
+        } else {
+            loadingActions.hideProfile();
         }
     });
     
@@ -61,15 +98,19 @@
     }
 </script>
 
-{#if currentStep === 3}
+<!-- Only render onboarding if it should be shown -->
+{#if shouldShow}
+  {#if isWaitingForProfile}
+    <!-- Let GlobalLoading handle this state -->
+  {:else if currentStep === 3}
     <!-- Authentication Step (Step 3) -->
     <OnboardingAuth on:authSuccess={handleAuthSuccess} />
-{:else if currentStep === 4}
+  {:else if currentStep === 4}
     <!-- Profile Setup Step (Step 4) -->
     <OnboardingProfile on:complete={handleProfileComplete} />
-{:else}
+  {:else}
     <!-- Regular Onboarding Layout for Steps 1 & 2 -->
-    <div class="min-h-screen bg-background flex flex-col relative">
+    <div class="min-h-screen flex flex-col relative">
         <!-- Main Content Container -->
         <div class="flex-1 flex flex-col justify-between items-center px-8 py-16">
             <!-- Top Section: Image and Text -->
@@ -122,4 +163,5 @@
             {/if}
         </div>
     </div>
+  {/if}
 {/if}
