@@ -149,6 +149,7 @@
         }
 
         loginLoading = true;
+        dispatch("authStart");
 
         try {
             if (authMode === "signup") {
@@ -171,7 +172,36 @@
             }
         } catch (error) {
             console.error("Auth error:", error);
-            toast.error("An unexpected error occurred. Please try again.");
+            
+            // Extract meaningful error message from Supabase
+            let errorMessage = "An unexpected error occurred. Please try again.";
+            
+            if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+                
+                if (message.includes("invalid login credentials") || 
+                    message.includes("email not confirmed") ||
+                    message.includes("invalid email or password")) {
+                    errorMessage = "Email or password is incorrect";
+                } else if (message.includes("email already registered") || 
+                          message.includes("user already registered")) {
+                    errorMessage = "An account with this email already exists";
+                } else if (message.includes("password should be at least")) {
+                    errorMessage = "Password must be at least 6 characters long";
+                } else if (message.includes("invalid email")) {
+                    errorMessage = "Please enter a valid email address";
+                } else if (message.includes("signup is disabled")) {
+                    errorMessage = "Account creation is currently disabled";
+                } else if (message.includes("email rate limit")) {
+                    errorMessage = "Too many attempts. Please wait before trying again";
+                } else {
+                    // For other specific errors, show the actual message if it's user-friendly
+                    errorMessage = error.message;
+                }
+            }
+            
+            toast.error(errorMessage);
+            dispatch("authError");
         } finally {
             loginLoading = false;
         }
