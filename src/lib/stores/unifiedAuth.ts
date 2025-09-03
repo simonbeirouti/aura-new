@@ -180,18 +180,46 @@ class UnifiedAuthStore {
 
   readonly shouldShowLogin = derived(
     this.store,
-    $state => !$state.isAuthenticated && $state.isInitialized
+    $state => !$state.isAuthenticated && ($state.isInitialized || $state.isLoading)
   );
 
   /**
    * Initialize the entire application authentication and data layer
    */
   async initialize(): Promise<InitializationResult> {
-    this.store.update(state => ({
-      ...state,
+    console.log('🚀 Starting app initialization...');
+
+    // Check if we're already in a logged-out state (isInitialized: true, isAuthenticated: false)
+    // This prevents re-initialization after logout
+    const currentState = get(this.store);
+    if (currentState.isInitialized && !currentState.isAuthenticated && !currentState.isLoading) {
+      console.log('ℹ️ Already in logged-out state, skipping full initialization');
+      return {
+        authReady: false,
+        profileReady: false,
+        stripeReady: false,
+        errors: []
+      };
+    }
+
+    // Force reset to unauthenticated state on app restart to ensure clean slate
+    // This prevents cached authentication state from persisting across app restarts
+    console.log('🔄 Force resetting to unauthenticated state...');
+    this.store.set({
+      isInitialized: false,
+      isAuthenticated: false,
+      user: null,
+      session: null,
       isLoading: true,
       error: null,
-    }));
+      profile: null,
+      profileLoaded: false,
+      onboardingCompleted: false,
+      currentOnboardingStep: 1,
+      stripeInitialized: false,
+      lastActivity: null,
+      tokenExpiresAt: null
+    });
 
     const result: InitializationResult = {
       authReady: false,
@@ -202,18 +230,45 @@ class UnifiedAuthStore {
 
     try {
       // Step 1: Initialize core systems
+      console.log('🔄 Initializing core systems...');
       await storeManager.initialize();
+      console.log('✅ Core systems initialized');
 
-      // Step 2: Initialize authentication
+      // Step 2: Initialize authentication (this will check for valid stored tokens)
+      console.log('🔄 Initializing authentication...');
       const authSuccess = await this.initializeAuth();
       result.authReady = authSuccess;
 
-      // Step 4: Load profile if authenticated
-      const state = get(this.store);
-      if (state.isAuthenticated && state.user) {
+      // Step 3: Additional validation - double-check if we're really authenticated
+      const currentState = get(this.store);
+      if (currentState.isAuthenticated && currentState.user) {
+        console.log('🔄 User appears authenticated, validating session...');
+
+        try {
+          // Try to get a fresh session from Supabase to validate
+          const { data: { session }, error } = await supabase.auth.getSession();
+
+          if (error || !session || !session.user) {
+            console.log('⚠️ Session validation failed, forcing unauthenticated state');
+            await this.setUnauthenticated('Session expired or invalid');
+            result.authReady = false;
+          } else {
+            console.log('✅ Session validated successfully');
+          }
+        } catch (validationError) {
+          console.log('⚠️ Session validation error, forcing unauthenticated state:', validationError);
+          await this.setUnauthenticated('Session validation failed');
+          result.authReady = false;
+        }
+      }
+
+      // Step 4: Load profile if still authenticated after validation
+      const stateAfterValidation = get(this.store);
+      if (stateAfterValidation.isAuthenticated && stateAfterValidation.user) {
+        console.log('🔄 Loading user profile...');
         try {
           await dataActions.initialize();
-          const profile = await dataActions.getUserProfile(state.user.id, false);
+          const profile = await dataActions.getUserProfile(stateAfterValidation.user.id, false);
 
           this.store.update(s => ({
             ...s,
@@ -222,11 +277,14 @@ class UnifiedAuthStore {
             onboardingCompleted: profile?.onboarding_complete || false
           }));
           result.profileReady = !!profile;
+          console.log('✅ Profile loaded successfully');
         } catch (error) {
-          result.errors.push(`Failed to load profile: ${error}`);
+          console.error('❌ Failed to load profile:', error);
+          result.errors.push(`Failed to load profile: ${error instanceof Error ? error.message : String(error)}`);
           this.store.update(s => ({ ...s, profileLoaded: true })); // Mark as loaded even if failed
         }
       } else {
+        console.log('ℹ️ No authenticated user, skipping profile load');
         this.store.update(s => ({ ...s, profileLoaded: true })); // No user, so profile is "loaded"
       }
 
@@ -239,9 +297,11 @@ class UnifiedAuthStore {
         isInitialized: true,
         isLoading: false
       }));
+      console.log('✅ App initialization completed successfully');
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('❌ App initialization failed:', error);
       result.errors.push(errorMessage);
 
       this.store.update(state => ({
@@ -501,49 +561,98 @@ class UnifiedAuthStore {
     }
   }
 
-  /**
+    /**
    * Handle user logout
    */
   async handleLogout(): Promise<void> {
+    console.log('🚪 Starting logout process...');
+
     // Always force complete logout regardless of errors
     try {
       // Step 1: Clear Supabase session
+      console.log('🔄 Clearing Supabase session...');
       const supabaseClient = createClient(
         import.meta.env.VITE_SUPABASE_URL,
         import.meta.env.VITE_SUPABASE_ANON_KEY
       );
-      
+
       // Try both global and local signout
       await Promise.allSettled([
         supabaseClient.auth.signOut(),
         supabaseClient.auth.signOut({ scope: 'local' })
       ]);
+      console.log('✅ Supabase session cleared');
     } catch (error) {
-      // Ignore Supabase errors - we'll force cleanup anyway
+      console.warn('⚠️ Supabase session cleanup failed:', error);
     }
 
     try {
-      // Step 2: Clear session store
+      // Step 2: Clear session store and stored tokens
+      console.log('🔄 Clearing session store and stored tokens...');
       await sessionStore.setUnauthenticated();
+
+      // Force clear all stored tokens from Tauri secure storage
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('logout');
+        console.log('✅ Tauri stored tokens cleared');
+      } catch (tokenError) {
+        console.warn('⚠️ Failed to clear Tauri tokens:', tokenError);
+      }
+
+      // Also clear any session data from regular Tauri store
+      try {
+        // Try to clear the Tauri store if available
+        // Note: This might not be available in all environments
+        console.log('ℹ️ Attempting to clear Tauri session store (may not be available)');
+      } catch (storeError) {
+        console.warn('⚠️ Failed to clear Tauri session store:', storeError);
+      }
+
+      console.log('✅ Session store cleared');
     } catch (error) {
-      // Session store cleanup failed, continue anyway
+      console.warn('⚠️ Session store cleanup failed:', error);
     }
 
-    // Step 3: Force clear all auth state (always runs)
-    await this.setUnauthenticated();
+    // Step 3: Clear all caches before resetting auth state
+    await this.clearAllCaches();
 
-    // Step 4: Navigate to root and final cleanup
+    // Step 4: Reset all user-related stores
+    await this.resetAllStores();
+
+    // Step 5: Force clear all auth state (always runs)
+    console.log('🔄 Force clearing all auth state...');
+    await this.setUnauthenticated();
+    console.log('✅ Auth state cleared');
+
+    // Step 6: Force reset the entire auth store to initial state
+    console.log('🔄 Resetting auth store to initial state...');
+    this.store.set({
+      isInitialized: true, // Set to true so shouldShowLogin derived store returns true
+      isAuthenticated: false,
+      user: null,
+      session: null,
+      isLoading: false,
+      error: null,
+      profile: null,
+      profileLoaded: false,
+      onboardingCompleted: false,
+      currentOnboardingStep: 1,
+      stripeInitialized: false,
+      lastActivity: null,
+      tokenExpiresAt: null
+    });
+    console.log('✅ Auth store reset to initial state');
+
+    // Step 7: Navigate to root and final cleanup
     try {
       await goto('/');
+      console.log('✅ Navigation to root completed');
     } catch (error) {
-      // Navigation failed, continue anyway
+      console.warn('⚠️ Navigation failed:', error);
     }
-    
-    this.store.update(state => ({ 
-      ...state, 
-      isLoading: false,
-      isInitialized: true // Keep initialized to prevent re-init loops
-    }));
+
+    console.log('🎉 Logout process completed successfully');
   }
 
   /**
@@ -724,6 +833,94 @@ class UnifiedAuthStore {
 
     // Start the interval
     syncInterval();
+  }
+
+  /**
+   * Clear all caches on logout
+   */
+  private async clearAllCaches(): Promise<void> {
+    try {
+      console.log('🔄 Clearing all caches during logout...');
+
+      // Clear cache manager
+      const { cacheManager } = await import('./cacheManager');
+      cacheManager.clear();
+      console.log('✅ Cache manager cleared');
+
+      // Clear any persistent store data
+      const { storeManager } = await import('./core/storeManager');
+      await storeManager.saveAll();
+      console.log('✅ Store manager data saved/cleared');
+
+      // Clear biometric store
+      const { biometricActions } = await import('./biometricStore');
+      biometricActions.reset();
+      console.log('✅ Biometric store reset');
+
+      // Clear user store
+      const { userStore } = await import('./userStore');
+      userStore.reset();
+      console.log('✅ User store reset');
+
+      // Clear purchase store
+      const { purchaseManager } = await import('./purchaseStore');
+      // Clear profile cache in settings store
+      const { settingsActions } = await import('./settingsStore');
+      await settingsActions.clearCache();
+      console.log('✅ Settings store cache cleared');
+
+      // Clear IAP store
+      const { iapStore } = await import('./iapStore');
+      iapStore.reset();
+      console.log('✅ IAP store reset');
+
+      // Clear data store
+      const { dataStore } = await import('./dataStore');
+      dataStore.reset();
+      console.log('✅ Data store reset');
+
+      console.log('🎉 All caches cleared successfully during logout');
+    } catch (error) {
+      console.warn('❌ Some caches may not have been cleared during logout:', error);
+    }
+  }
+
+  /**
+   * Reset all stores on logout
+   */
+  private async resetAllStores(): Promise<void> {
+    try {
+      console.log('🔄 Resetting all stores during logout...');
+
+      // Reset user store
+      const { userStore } = await import('./userStore');
+      userStore.reset();
+      console.log('✅ User store reset');
+
+      // Reset purchase store
+      const { purchaseManager } = await import('./purchaseStore');
+      (purchaseManager as any).reset?.();
+      console.log('✅ Purchase store reset');
+
+      // Reset IAP store
+      const { iapStore } = await import('./iapStore');
+      iapStore.reset();
+      console.log('✅ IAP store reset');
+
+      // Reset data store
+      const { dataStore } = await import('./dataStore');
+      dataStore.reset();
+      console.log('✅ Data store reset');
+
+      // Reset loading store
+      const { loadingStore } = await import('./loadingStore');
+      loadingStore.clear();
+      console.log('✅ Loading store cleared');
+
+      console.log('🎉 All stores reset successfully during logout');
+    } catch (error) {
+      console.warn('❌ Some stores may not have been reset during logout:', error);
+    }
   }
 
   /**

@@ -225,7 +225,7 @@ export const productsByCategory = derived(
   products,
   ($products) => {
     const categories: { [key: string]: Product[] } = {};
-    
+
     $products.forEach(product => {
       const category = product.category || 'Other';
       if (!categories[category]) {
@@ -233,10 +233,17 @@ export const productsByCategory = derived(
       }
       categories[category].push(product);
     });
-    
+
     return categories;
   }
 );
+
+// Add reset method to existing purchaseManager
+Object.assign(purchaseManager, {
+  reset: () => {
+    purchaseStore.set(initialState);
+  }
+});
 
 // Product loading is now handled by unifiedAuth initialization
 // to prevent loading during auth completion and ensure consistent state management

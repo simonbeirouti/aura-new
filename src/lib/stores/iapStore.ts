@@ -585,6 +585,25 @@ function createIAPStore() {
     }));
   }
 
+  function reset(): void {
+    update(state => ({
+      isInitialized: false,
+      canMakePayments: false,
+      countryCode: null,
+      products: [],
+      purchases: [],
+      transactions: [],
+      activeSubscriptions: [],
+      isLoading: false,
+      error: null,
+      pluginAvailable: false,
+      lastInitialized: null,
+      lastProductsQuery: null,
+      lastPurchasesRestore: null,
+      cacheValidDuration: 5 * 60 * 1000
+    }));
+  }
+
   async function openSubscriptionSettings(productId: string): Promise<void> {
     try {
       // Check if plugin is available first
@@ -719,7 +738,8 @@ function createIAPStore() {
     updateSubscriptionStatus,
     clearError,
     setupPurchaseListener,
-    cleanupPurchaseListener
+    cleanupPurchaseListener,
+    reset
   };
 }
 

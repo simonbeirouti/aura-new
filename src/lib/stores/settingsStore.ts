@@ -172,22 +172,6 @@ export const settingsActions = {
     }
   },
 
-  // Cache management
-  clearCache(): void {
-    const userId = getCurrentUserId();
-    if (userId) {
-      // Clear all user-specific cache entries
-      cacheManager.invalidatePattern(cacheKeys.userPattern(userId));
-    }
-
-    // Reset store state
-    settingsStore.update(s => ({
-      ...s,
-      profile: null,
-      isInitialized: false
-    }));
-  },
-
   async invalidateProfileCache(): Promise<void> {
     const userId = getCurrentUserId();
     if (userId) {
@@ -198,6 +182,23 @@ export const settingsActions = {
   // Force refresh all data
   async refreshAll(): Promise<void> {
     await this.loadProfile(true);
+  },
+
+  // Clear all cache (used during logout) - async version for comprehensive cleanup
+  async clearCache(): Promise<void> {
+    const userId = getCurrentUserId();
+    if (userId) {
+      // Clear all user-specific cache entries using dynamic import for logout compatibility
+      const { cacheManager, cacheKeys } = await import('./cacheManager');
+      cacheManager.invalidatePattern(cacheKeys.userPattern(userId));
+    }
+
+    // Reset store state
+    settingsStore.update(s => ({
+      ...s,
+      profile: null,
+      isInitialized: false
+    }));
   },
 };
 

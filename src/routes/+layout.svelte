@@ -20,16 +20,31 @@
   $: shouldShowLogin = centralizedAuth.shouldShowLogin;
   $: isReady = centralizedAuth.isReady;
 
+  // Debug derived store values
+  $: console.log('Layout: Derived stores:', {
+    shouldShowApp,
+    shouldShowOnboarding,
+    shouldShowLogin,
+    isReady,
+    authState: {
+      isAuthenticated: $centralizedAuth.isAuthenticated,
+      isInitialized: $centralizedAuth.isInitialized,
+      isLoading: $centralizedAuth.isLoading
+    }
+  });
+
   let initializationComplete = false;
   let initializationErrors: string[] = [];
   let biometricAuthRequired = false;
   let biometricAuthComplete = false;
 
   onMount(async () => {
+    console.log('Layout: onMount triggered');
     loadingActions.showApp();
-    
+
     try {
       const result = await centralizedAuth.initialize();
+      console.log('Layout: Initialization result:', result);
       
       if (result.errors.length > 0) {
         initializationErrors = result.errors;
@@ -43,8 +58,9 @@
 
       // Initialize biometric store only if user is authenticated
       if (result.authReady && $centralizedAuth.isAuthenticated) {
+        console.log('Layout: Initializing biometric store');
         await biometricActions.initialize();
-        
+
         // Only check for startup auth if biometric is actually enabled
         const settings = await biometricActions.loadSettings();
         if (settings.enabled && settings.require_on_startup && $isBiometricAvailable) {
@@ -55,18 +71,20 @@
           biometricAuthComplete = true;
         }
       } else {
+        console.log('Layout: Skipping biometric initialization - not authenticated');
         biometricAuthComplete = true;
       }
       
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       initializationErrors = [errorMessage];
-      console.error('Failed to initialize application:', error);
+      console.error('Layout: Failed to initialize application:', error);
       toast.error(`Failed to initialize: ${errorMessage}`);
       biometricAuthComplete = true;
     } finally {
       initializationComplete = true;
       loadingActions.hideApp();
+      console.log('Layout: Initialization complete');
     }
   });
 
@@ -164,14 +182,29 @@
   {:else}
     <!-- Conditionally render onboarding component based on auth state -->
     {#if $shouldShowOnboarding || $shouldShowLogin}
+      {console.log('Layout: Showing onboarding (primary condition)')}
       <Onboarding on:complete={handleOnboardingComplete} />
+    {:else if !$shouldShowApp && !$centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized}
+      {console.log('Layout: Showing onboarding (fallback condition)')}
+      <!-- Fallback: Show onboarding when not authenticated but initialized -->
+      <Onboarding on:complete={handleOnboardingComplete} />
+    {:else}
+      {console.log('Layout: No content to show', {
+        shouldShowOnboarding: $shouldShowOnboarding,
+        shouldShowLogin: $shouldShowLogin,
+        shouldShowApp: $shouldShowApp,
+        isAuthenticated: $centralizedAuth.isAuthenticated,
+        isInitialized: $centralizedAuth.isInitialized,
+        biometricAuthComplete
+      })}
     {/if}
-    
+
     <!-- Main app content - only show when authenticated and onboarding complete -->
     {#if $shouldShowApp && biometricAuthComplete}
+      {console.log('Layout: Showing main app content')}
       <div in:fade={{ duration: 400 }}>
         <SubscriptionManager />
-        
+
         <div class="flex-1" style="height: calc(100vh - 4rem); max-height: calc(100vh - 4rem); overflow: hidden;">
           <slot />
         </div>

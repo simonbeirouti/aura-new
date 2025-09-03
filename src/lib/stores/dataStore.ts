@@ -248,20 +248,29 @@ class DataStore {
 
       // Fetch from database
       const profile = await invoke<Profile | null>('get_user_profile', { userId: userId });
-      
-      if (profile) {
+
+      // Defensive check for profile data structure
+      if (profile && typeof profile === 'object' && profile.id) {
         // Update cache
         this.updateProfileCache(userId, profile);
-        
+
         // Update current profile if it's the current user
         this.store.update(state => ({
           ...state,
           currentProfile: profile,
           error: null
         }));
-      }
 
-      return profile;
+        return profile;
+      } else if (profile === null) {
+        // Profile doesn't exist, this is normal for new users
+        console.log(`Profile not found for user ${userId}, this is normal for new users`);
+        return null;
+      } else {
+        // Profile exists but has invalid structure
+        console.warn(`Invalid profile structure for user ${userId}:`, profile);
+        throw new Error('Invalid profile data structure received from database');
+      }
     } catch (error) {
       console.error('Failed to get user profile:', error);
       
@@ -388,16 +397,22 @@ class DataStore {
 
   // Cache management
   private async getCachedProfile(userId: string): Promise<Profile | null> {
-    let currentState: DataState;
+    let currentState: DataState | undefined;
     const unsubscribe = this.store.subscribe(state => { currentState = state; });
     unsubscribe();
 
-    const cached = currentState!.profileCache.get(userId);
+    // Defensive check for undefined state
+    if (!currentState || !currentState.profileCache || !currentState.cacheTimestamps) {
+      console.warn('getCachedProfile: Invalid or undefined state detected');
+      return null;
+    }
+
+    const cached = currentState.profileCache.get(userId);
     if (!cached) return null;
 
     // Check if cache is still valid
-    const cacheTime = currentState!.cacheTimestamps.get(userId);
-    if (!cacheTime || Date.now() - cacheTime > currentState!.cacheTTL) {
+    const cacheTime = currentState.cacheTimestamps.get(userId);
+    if (!cacheTime || Date.now() - cacheTime > currentState.cacheTTL) {
       return null;
     }
 
@@ -558,6 +573,11 @@ class DataStore {
 
   async save() {
     await this.store.save();
+  }
+
+  // Reset store to initial state (public method for logout)
+  reset() {
+    this.store.set(initialDataState);
   }
 
   // Cleanup

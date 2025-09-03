@@ -18,6 +18,27 @@
     
     const shouldShowApp = centralizedAuth.shouldShowApp;
 
+    // Force re-evaluation of authentication state on component mount
+    // This helps ensure proper state after logout/restart
+    $effect(() => {
+        // Trigger a re-check of authentication state
+        const isAuthenticated = $centralizedAuth.isAuthenticated;
+        const isInitialized = $centralizedAuth.isInitialized;
+        const isLoading = $centralizedAuth.isLoading;
+
+        console.log('Onboarding: Auth state check:', {
+            isAuthenticated,
+            isInitialized,
+            isLoading,
+            shouldShowLogin: !isAuthenticated && (isInitialized || isLoading)
+        });
+
+        // If we're not authenticated and initialized, ensure we're showing the right flow
+        if (!isAuthenticated && (isInitialized || isLoading)) {
+            console.log('Onboarding: User not authenticated, showing auth flow');
+        }
+    });
+
     // Sync local states with centralized auth state
     $effect(() => {
         const wasCompleted = onboardingComplete;
