@@ -174,7 +174,6 @@
 
     async function completeOnboarding(isSkipped = false) {
         if (!$centralizedAuth.user) {
-            console.error("No authenticated user found");
             return;
         }
 
@@ -220,26 +219,32 @@
             // Reset view before dispatching completion
             resetView();
 
-            // Small delay to ensure view reset completes before transition
+            // Show success message before dispatching completion
+            toast.success("Profile setup complete! Welcome to Aura.");
+
+            // Small delay to ensure view reset completes and user sees success message
             setTimeout(() => {
                 // Dispatch completion event
                 dispatch("complete", {
                     skipped: isSkipped,
                     profile: profilePayload,
                 });
-            }, 150);
+            }, 800); // Increased delay to show success message
             
         } catch (error) {
             // Reset view even on error
             resetView();
-            
+
+            // Show error message
+            toast.error("There was an issue saving your profile. Continuing anyway...");
+
             // Still dispatch completion to avoid getting stuck
             setTimeout(() => {
                 dispatch("complete", {
                     skipped: true,
                     error: error instanceof Error ? error.message : "Unknown error",
                 });
-            }, 150);
+            }, 500); // Give user time to see error message
         } finally {
             isSaving = false;
         }

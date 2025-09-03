@@ -94,10 +94,36 @@
   }
 
   function handleOnboardingComplete() {
-    centralizedAuth.completeOnboarding();
-  }
-  
+    // Check if onboarding is already complete to avoid unnecessary profile refresh
+    if ($centralizedAuth.profileLoaded && $centralizedAuth.profile?.onboarding_complete) {
+      // Onboarding already complete, immediately hide loading and return
+      // No need for delays or profile refresh
+      loadingActions.hideApp();
+      return;
+    }
 
+    // Show success feedback before transitioning
+    loadingActions.showApp();
+
+    // Add a small delay to show completion feedback and prevent flash
+    setTimeout(async () => {
+      try {
+        await centralizedAuth.completeOnboarding();
+        // Small additional delay after profile refresh to ensure smooth transition
+        setTimeout(() => {
+          loadingActions.hideApp();
+        }, 200);
+      } catch (error) {
+        console.error('Error completing onboarding:', error);
+        loadingActions.hideApp();
+      }
+    }, 300);
+  }
+
+  // Ensure loading is cleared when app should be shown
+  $: if ($shouldShowApp && initializationComplete) {
+    loadingActions.hideApp();
+  }
 </script>
 
 <div class="fixed inset-0 flex flex-col" style="height: 100vh; max-height: 100vh; overflow: hidden;">
@@ -137,8 +163,10 @@
   {:else if !$isReady}
     <!-- Let GlobalLoading handle this state -->
   {:else}
-    <!-- Always include onboarding component - it handles its own visibility -->
-    <Onboarding on:complete={handleOnboardingComplete} />
+    <!-- Conditionally render onboarding component based on auth state -->
+    {#if $shouldShowOnboarding || $shouldShowLogin}
+      <Onboarding on:complete={handleOnboardingComplete} />
+    {/if}
     
     <!-- Main app content - only show when authenticated and onboarding complete -->
     {#if $shouldShowApp && biometricAuthComplete}

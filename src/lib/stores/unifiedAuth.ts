@@ -71,6 +71,10 @@ interface UnifiedAuthState {
   profile: any | null;
   profileLoaded: boolean;
 
+  // Onboarding state
+  onboardingCompleted: boolean;
+  currentOnboardingStep: number;
+
   // System status
   stripeInitialized: boolean;
 
@@ -97,6 +101,8 @@ const initialState: UnifiedAuthState = {
   error: null,
   profile: null,
   profileLoaded: false,
+  onboardingCompleted: false,
+  currentOnboardingStep: 1,
   stripeInitialized: false,
   lastActivity: null,
   tokenExpiresAt: null
@@ -120,7 +126,24 @@ class UnifiedAuthStore {
   readonly shouldShowApp = derived(
     this.store,
     $state => {
-      const result = $state.isAuthenticated && $state.profile && $state.profile.onboarding_complete;
+      // Only show app if:
+      // 1. User is authenticated
+      // 2. Profile loading is complete (profileLoaded: true)
+      // 3. Profile exists and onboarding is complete
+      // 4. System is fully initialized
+      const isAuthenticated = $state.isAuthenticated;
+      const profileLoaded = $state.profileLoaded;
+      const profile = $state.profile;
+      const isInitialized = $state.isInitialized;
+
+      const result = isAuthenticated && profileLoaded && profile && profile.onboarding_complete;
+
+      // Don't show app until everything is fully initialized
+      if (!isInitialized) {
+        return false;
+      }
+
+      // Only show app if authenticated, profile loaded, and onboarding complete
       return result;
     }
   );
@@ -128,7 +151,29 @@ class UnifiedAuthStore {
   readonly shouldShowOnboarding = derived(
     this.store,
     $state => {
-      const result = $state.isAuthenticated && $state.profileLoaded && (!$state.profile || !$state.profile.onboarding_complete);
+      // Only show onboarding if:
+      // 1. User is authenticated
+      // 2. Profile loading is complete (profileLoaded: true)
+      // 3. Profile either doesn't exist or onboarding is not complete
+      // 4. We have waited long enough to ensure stable state (prevent flash)
+      const isAuthenticated = $state.isAuthenticated;
+      const profileLoaded = $state.profileLoaded;
+      const profile = $state.profile;
+      const isInitialized = $state.isInitialized;
+
+      const result = isAuthenticated && profileLoaded && (!profile || !profile.onboarding_complete);
+
+      // Don't show onboarding until everything is fully initialized
+      if (!isInitialized) {
+        return false;
+      }
+
+      // If profile is still loading, don't show onboarding yet to prevent flash
+      if (isAuthenticated && !profileLoaded) {
+        return false;
+      }
+
+      // Only show onboarding if authenticated, profile loaded, and onboarding not complete
       return result;
     }
   );
@@ -173,7 +218,8 @@ class UnifiedAuthStore {
           this.store.update(s => ({
             ...s,
             profile,
-            profileLoaded: true
+            profileLoaded: true,
+            onboardingCompleted: profile?.onboarding_complete || false
           }));
           result.profileReady = !!profile;
         } catch (error) {
@@ -184,7 +230,10 @@ class UnifiedAuthStore {
         this.store.update(s => ({ ...s, profileLoaded: true })); // No user, so profile is "loaded"
       }
 
-      // Step 5: Mark as initialized
+      // Step 5: Wait a moment for all async operations to complete
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      // Step 6: Mark as initialized
       this.store.update(state => ({
         ...state,
         isInitialized: true,
@@ -280,8 +329,8 @@ class UnifiedAuthStore {
       throw new Error(`Database error saving new user: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
 
-    // Wait a moment for session store to be fully written
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Wait longer for session store to be fully written and profile to load
+    await new Promise(resolve => setTimeout(resolve, 200));
 
     // Initialize user store with authenticated user
     try {
@@ -294,9 +343,17 @@ class UnifiedAuthStore {
     // Load user profile data
     try {
       await this.refreshProfile();
+
+      // After profile refresh, check if onboarding is completed
+      const state = get(this.store);
+      if (state.profile && state.profile.onboarding_complete) {
+        this.store.update(s => ({ ...s, onboardingCompleted: true }));
+      }
     } catch (error) {
       // Don't fail authentication if profile loading fails
       // This is expected for new users who haven't created a profile yet
+      // But we still need to mark profile as loaded to prevent inconsistent state
+      this.store.update(s => ({ ...s, profileLoaded: true }));
     }
 
     // Start background IAP sync after authentication
@@ -335,6 +392,8 @@ class UnifiedAuthStore {
       error: error || null,
       profile: null,
       profileLoaded: false,
+      onboardingCompleted: false,
+      currentOnboardingStep: 1,
       lastActivity: null,
       tokenExpiresAt: null
     }));
@@ -461,24 +520,23 @@ class UnifiedAuthStore {
       ]);
     } catch (error) {
       // Ignore Supabase errors - we'll force cleanup anyway
-      console.warn('Supabase signout failed, forcing local cleanup:', error);
     }
 
     try {
       // Step 2: Clear session store
       await sessionStore.setUnauthenticated();
     } catch (error) {
-      console.warn('Session store cleanup failed:', error);
+      // Session store cleanup failed, continue anyway
     }
 
     // Step 3: Force clear all auth state (always runs)
     await this.setUnauthenticated();
-    
+
     // Step 4: Navigate to root and final cleanup
     try {
       await goto('/');
     } catch (error) {
-      console.warn('Navigation failed during logout:', error);
+      // Navigation failed, continue anyway
     }
     
     this.store.update(state => ({ 
@@ -524,6 +582,8 @@ class UnifiedAuthStore {
 
       this.store.update(s => ({ ...s, profile, profileLoaded: true }));
     } catch (error) {
+      // Even on failure, mark profile as loaded to prevent UI getting stuck
+      this.store.update(s => ({ ...s, profileLoaded: true }));
       throw error;
     }
   }
@@ -532,7 +592,48 @@ class UnifiedAuthStore {
    * Handle onboarding completion
    */
   async completeOnboarding(): Promise<void> {
+    // Mark onboarding as completed in the store
+    this.store.update(state => ({ ...state, onboardingCompleted: true }));
     await this.refreshProfile();
+  }
+
+  /**
+   * Check if onboarding is completed
+   */
+  isOnboardingCompleted(): boolean {
+    return get(this.store).onboardingCompleted;
+  }
+
+  /**
+   * Mark onboarding as completed
+   */
+  markOnboardingCompleted(): void {
+    this.store.update(state => ({ ...state, onboardingCompleted: true }));
+  }
+
+  /**
+   * Get current onboarding step
+   */
+  getCurrentOnboardingStep(): number {
+    return get(this.store).currentOnboardingStep;
+  }
+
+  /**
+   * Set current onboarding step
+   */
+  setCurrentOnboardingStep(step: number): void {
+    this.store.update(state => ({ ...state, currentOnboardingStep: step }));
+  }
+
+  /**
+   * Reset onboarding completion state
+   */
+  resetOnboardingState(): void {
+    this.store.update(state => ({
+      ...state,
+      onboardingCompleted: false,
+      currentOnboardingStep: 1
+    }));
   }
 
   /**

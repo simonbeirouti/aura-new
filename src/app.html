@@ -5,25 +5,24 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <title>Aura</title>
-    <style>      
+    <style>
       /* Prevent double-click zoom throughout the app */
       * {
         touch-action: manipulation;
       }
-      
-      /* Additional zoom prevention for inputs and buttons */
-      input, button, select, textarea {
-        touch-action: manipulation;
-        -webkit-touch-callout: none;
+
+      /* Prevent text selection throughout the entire application */
+      *, *::before, *::after {
         -webkit-user-select: none;
         -khtml-user-select: none;
         -moz-user-select: none;
         -ms-user-select: none;
         user-select: none;
+        -webkit-touch-callout: none;
       }
-      
-      /* Allow text selection in text inputs and textareas */
-      input[type="text"], input[type="email"], input[type="password"], 
+
+      /* Allow text selection only in text inputs and textareas */
+      input[type="text"], input[type="email"], input[type="password"],
       input[type="search"], input[type="url"], textarea {
         -webkit-user-select: text;
         -khtml-user-select: text;
