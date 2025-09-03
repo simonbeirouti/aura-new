@@ -1,805 +1,539 @@
-import { writable, derived, get } from 'svelte/store';
-import { createClient, type AuthSession, type User } from '@supabase/supabase-js';
-import { goto } from '$app/navigation';
-import { sessionStore } from './sessionStore';
-import { dataActions } from './dataStore';
-import { storeManager } from './core/storeManager';
-import { userStore } from './userStore';
-import { syncSubscriptionsWithIAP } from '$lib/utils/iapDatabase';
-import { purchaseManager } from './purchaseStore';
+<script lang="ts">
+    import { createEventDispatcher, onMount, onDestroy } from "svelte";
+    import { centralizedAuth } from "../../stores/unifiedAuth";
+    import { toast } from "svelte-sonner";
+    import { Button } from "../ui/button";
+    import { Input } from "../ui/input";
+    import { Card, CardContent } from "../ui/card";
+    import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
+    import { loadingStore } from "../../stores/loadingStore";
 
-// Supabase client setup with better error handling
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const dispatch = createEventDispatcher();
 
-// Create a safe Supabase client that won't crash on missing env vars
-let supabase: any;
-try {
-  if (!supabaseUrl || !supabaseAnonKey) {
-    console.error('Missing Supabase environment variables:', {
-      hasUrl: !!supabaseUrl,
-      hasKey: !!supabaseAnonKey
+    // Login state
+    let email = "";
+    let password = "";
+    let authMode = "signup"; // "signup" or "login"
+    let loginLoading = false;
+    let showPassword = false;
+    let initialViewportHeight = 0;
+    let currentViewportHeight = 0;
+    let authCompleted = false; // Track when auth is successfully completed
+    let isSwitchingInputs = false; // Track when switching between form inputs
+
+    // Login validation functions
+    function isValidEmail(email: string): boolean {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        return emailRegex.test(email.trim());
+    }
+
+    function isValidPassword(password: string): boolean {
+        return password.trim().length >= 6;
+    }
+
+    function validateForm(): string | null {
+        const trimmedEmail = email.trim();
+        const trimmedPassword = password.trim();
+
+        if (!trimmedEmail) {
+            return "Please enter your email address";
+        }
+
+        if (!isValidEmail(trimmedEmail)) {
+            return "Please enter a valid email address (e.g., test@email.com)";
+        }
+
+        if (!trimmedPassword) {
+            return "Please enter your password";
+        }
+
+        if (!isValidPassword(trimmedPassword)) {
+            return "Password must be at least 6 characters long";
+        }
+
+        return null;
+    }
+
+    // Check if form is valid for button state
+    $: isFormValid =
+        email.trim() &&
+        password.trim() &&
+        isValidEmail(email.trim()) &&
+        isValidPassword(password.trim());
+
+    function togglePassword() {
+        showPassword = !showPassword;
+    }
+
+    function handleInputFocus() {
+        if (typeof window !== "undefined") {
+            // Indicate we're switching between inputs
+            isSwitchingInputs = true;
+
+            currentViewportHeight = window.innerHeight;
+
+            // Store the current scroll position
+            const currentScrollY = window.scrollY;
+
+            // Adjust viewport meta for better keyboard handling
+            const viewportMeta = document.querySelector(
+                'meta[name="viewport"]',
+            );
+            if (viewportMeta) {
+                viewportMeta.setAttribute(
+                    "content",
+                    "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no",
+                );
+            }
+        }
+    }
+
+    function handleInputBlur() {
+        if (typeof window !== "undefined") {
+            // Indicate we've stopped focusing this input
+            isSwitchingInputs = false;
+
+            // Don't reset viewport if auth was just completed - keep keyboard space
+            if (authCompleted) {
+                return;
+            }
+
+            setTimeout(() => {
+                // Double-check auth isn't completed and we're not switching inputs
+                if (authCompleted || isSwitchingInputs) {
+                    return;
+                }
+
+                currentViewportHeight = initialViewportHeight;
+
+                // Reset viewport meta tag
+                const viewportMeta = document.querySelector(
+                    'meta[name="viewport"]',
+                );
+                if (viewportMeta) {
+                    viewportMeta.setAttribute(
+                        "content",
+                        "width=device-width, initial-scale=1.0",
+                    );
+                }
+
+                // Ensure we're scrolled to the top
+                window.scrollTo({ top: 0, behavior: "smooth" });
+
+                // Force a repaint to ensure proper positioning
+                document.body.style.height = "auto";
+                setTimeout(() => {
+                    document.body.style.height = "";
+                }, 50);
+            }, 300); // Increased timeout to ensure keyboard is fully dismissed
+        }
+    }
+
+    function handleViewportResize() {
+        if (typeof window !== "undefined") {
+            currentViewportHeight = window.innerHeight;
+
+            // Don't reset viewport if auth was completed or we're switching inputs
+            if (authCompleted || isSwitchingInputs) {
+                return;
+            }
+
+            // If viewport is back to initial height, reset any viewport adjustments
+            if (currentViewportHeight >= initialViewportHeight * 0.9) {
+                // Reset viewport meta tag to ensure proper scaling
+                const viewportMeta = document.querySelector(
+                    'meta[name="viewport"]',
+                );
+                if (viewportMeta) {
+                    viewportMeta.setAttribute(
+                        "content",
+                        "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no",
+                    );
+
+                    // Force a small delay then reset to allow proper scaling
+                    setTimeout(() => {
+                        viewportMeta.setAttribute(
+                            "content",
+                            "width=device-width, initial-scale=1.0",
+                        );
+                    }, 100);
+                }
+
+                // Scroll to top to ensure proper positioning
+                window.scrollTo({ top: 0, behavior: "smooth" });
+            }
+        }
+    }
+
+    function handleFormSubmit(event: Event) {
+        event.preventDefault(); // Prevent any form submission
+        handleEmailAuth();
+    }
+
+    async function handleEmailAuth() {
+        const validationError = validateForm();
+        if (validationError) {
+            toast.error(validationError);
+            return;
+        }
+
+        // Show loading immediately and dispatch auth start
+        loginLoading = true;
+        loadingStore.show({ id: "auth_process" });
+        dispatch("authStart");
+
+        try {
+            if (authMode === "signup") {
+                await centralizedAuth.handleSignUp(
+                    email.trim(),
+                    password.trim(),
+                );
+                toast.success(
+                    "Account created successfully! Please check your email to verify your account.",
+                );
+                // Mark auth as completed to prevent viewport reset
+                authCompleted = true;
+                // Hide loading after successful signup
+                loadingStore.hide("auth_process");
+                // For signup, don't dispatch success immediately - wait for email verification
+                // The unified auth store will handle the state changes when email is confirmed
+            } else {
+                await centralizedAuth.handleLogin(
+                    email.trim(),
+                    password.trim(),
+                );
+                // Mark auth as completed to prevent viewport reset
+                authCompleted = true;
+
+                // Wait at least 1 second for state to settle and prevent flash
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // Hide loading and dispatch success
+                loadingStore.hide("auth_process");
+                dispatch("authSuccess");
+            }
+                } catch (error) {
+
+            // Clean up loading state
+            loadingStore.hide("auth_process");
+
+            // Extract meaningful error message from Supabase
+            let errorMessage = "An unexpected error occurred. Please try again.";
+
+            if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+
+                if (message.includes("invalid login credentials") ||
+                    message.includes("email not confirmed") ||
+                    message.includes("invalid email or password")) {
+                    errorMessage = "Email or password is incorrect";
+                } else if (message.includes("email already registered") ||
+                          message.includes("user already registered")) {
+                    errorMessage = "An account with this email already exists";
+                } else if (message.includes("password should be at least")) {
+                    errorMessage = "Password must be at least 6 characters long";
+                } else if (message.includes("invalid email")) {
+                    errorMessage = "Please enter a valid email address";
+                } else if (message.includes("signup is disabled")) {
+                    errorMessage = "Account creation is currently disabled";
+                } else if (message.includes("email rate limit")) {
+                    errorMessage = "Too many attempts. Please wait before trying again";
+                } else {
+                    // For other specific errors, show the actual message if it's user-friendly
+                    errorMessage = error.message;
+                }
+            }
+
+            toast.error(errorMessage);
+            dispatch("authError");
+        } finally {
+            loginLoading = false;
+            loadingStore.hide("auth_process");
+        }
+    }
+
+    async function handleAppleSignIn() {
+        toast.info("Apple Sign-In coming soon!");
+    }
+
+    async function handleFacebookSignIn() {
+        toast.info("Facebook Sign-In coming soon!");
+    }
+
+    async function handleGoogleSignIn() {
+        toast.info("Google Sign-In coming soon!");
+    }
+
+    // Lifecycle methods for viewport handling
+    onMount(() => {
+        if (typeof window !== "undefined") {
+            initialViewportHeight = window.innerHeight;
+            currentViewportHeight = initialViewportHeight;
+
+            window.addEventListener("resize", handleViewportResize);
+
+            // Add visual viewport support for better mobile handling
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener(
+                    "resize",
+                    handleViewportResize,
+                );
+            }
+
+            // Set initial viewport meta tag
+            const viewportMeta = document.querySelector(
+                'meta[name="viewport"]',
+            );
+            if (viewportMeta) {
+                viewportMeta.setAttribute(
+                    "content",
+                    "width=device-width, initial-scale=1.0",
+                );
+            }
+
+            // Prevent zoom on double tap for iOS
+            document.addEventListener(
+                "touchstart",
+                function (event) {
+                    if (event.touches.length > 1) {
+                        event.preventDefault();
+                    }
+                },
+                { passive: false },
+            );
+
+            let lastTouchEnd = 0;
+            document.addEventListener(
+                "touchend",
+                function (event) {
+                    const now = new Date().getTime();
+                    if (now - lastTouchEnd <= 300) {
+                        event.preventDefault();
+                    }
+                    lastTouchEnd = now;
+                },
+                false,
+            );
+        }
     });
 
-    // On mobile platforms, this might be expected during development
-    if (typeof window !== 'undefined' && 'webkit' in window) {
-      console.warn('Mobile platform detected - Supabase configuration may be incomplete during development');
-    }
+    onDestroy(() => {
+        if (typeof window !== "undefined") {
+            window.removeEventListener("resize", handleViewportResize);
 
-    throw new Error(
-      'Missing Supabase environment variables. Please check your .env file and ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.'
-    );
-  }
+            // Clean up visual viewport listener
+            if (window.visualViewport) {
+                window.visualViewport.removeEventListener(
+                    "resize",
+                    handleViewportResize,
+                );
+            }
 
-  supabase = createClient(supabaseUrl, supabaseAnonKey);
-} catch (error) {
-  console.error('Failed to create Supabase client:', error);
+            // Reset viewport meta tag on cleanup
+            const viewportMeta = document.querySelector(
+                'meta[name="viewport"]',
+            );
+            if (viewportMeta) {
+                viewportMeta.setAttribute(
+                    "content",
+                    "width=device-width, initial-scale=1.0",
+                );
+            }
 
-  // Create a dummy client to prevent runtime errors
-  supabase = {
-    auth: {
-      setSession: () => Promise.resolve({ data: { user: null }, error: new Error('Supabase not configured') }),
-      getSession: () => Promise.resolve({ data: { session: null }, error: new Error('Supabase not configured') }),
-      signInWithPassword: () => Promise.resolve({ data: { user: null, session: null }, error: new Error('Supabase not configured') }),
-      signUp: () => Promise.resolve({ data: { user: null, session: null }, error: new Error('Supabase not configured') }),
-      signOut: () => Promise.resolve({ error: null }),
-      refreshSession: () => Promise.resolve({ data: { session: null }, error: new Error('Supabase not configured') }),
-      getUser: () => Promise.resolve({ data: { user: null }, error: new Error('Supabase not configured') })
-    }
-  };
-}
-
-export { supabase };
-
-// Export centralized config access
-export const getSupabaseConfig = () => ({
-  url: supabaseUrl,
-  anonKey: supabaseAnonKey,
-  hasValidConfig: !!(supabaseUrl && supabaseAnonKey)
-});
-
-// Unified Auth State Interface
-interface UnifiedAuthState {
-  // Core auth state
-  isInitialized: boolean;
-  isAuthenticated: boolean;
-  user: User | null;
-  session: AuthSession | null;
-  isLoading: boolean;
-  error: string | null;
-
-  // Profile data
-  profile: any | null;
-  profileLoaded: boolean;
-
-  // Product data
-  productsLoaded: boolean;
-
-  // Onboarding state
-  onboardingCompleted: boolean;
-  currentOnboardingStep: number;
-
-  // System status
-  stripeInitialized: boolean;
-
-  // Session management
-  lastActivity: number | null;
-  tokenExpiresAt: number | null;
-}
-
-// Initialization result
-export interface InitializationResult {
-  authReady: boolean;
-  profileReady: boolean;
-  productsReady: boolean;
-  stripeReady: boolean;
-  errors: string[];
-}
-
-// Initial state
-const initialState: UnifiedAuthState = {
-  isInitialized: false,
-  isAuthenticated: false,
-  user: null,
-  session: null,
-  isLoading: true,
-  error: null,
-  profile: null,
-  profileLoaded: false,
-  productsLoaded: false,
-  onboardingCompleted: false,
-  currentOnboardingStep: 1,
-  stripeInitialized: false,
-  lastActivity: null,
-  tokenExpiresAt: null
-};
-
-// Unified Authentication Store
-class UnifiedAuthStore {
-  private store = writable<UnifiedAuthState>(initialState);
-  private refreshTimer: NodeJS.Timeout | null = null;
-  private iapSyncTimer: NodeJS.Timeout | null = null;
-
-  // Store subscription
-  subscribe = this.store.subscribe;
-
-  // Derived states for UI logic
-  readonly isReady = derived(
-    this.store,
-    $state => $state.isInitialized && !$state.isLoading
-  );
-
-  readonly shouldShowApp = derived(
-    this.store,
-    $state => {
-      // Only show app if:
-      // 1. User is authenticated
-      // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Products loading is complete (productsLoaded: true)
-      // 4. Profile exists and onboarding is complete
-      // 5. System is fully initialized
-      const isAuthenticated = $state.isAuthenticated;
-      const profileLoaded = $state.profileLoaded;
-      const productsLoaded = $state.productsLoaded;
-      const profile = $state.profile;
-      const isInitialized = $state.isInitialized;
-
-      const result = isAuthenticated && profileLoaded && productsLoaded && profile && profile.onboarding_complete;
-
-      // Don't show app until everything is fully initialized
-      if (!isInitialized) {
-        return false;
-      }
-
-      // Only show app if authenticated, profile loaded, products loaded, and onboarding complete
-      return result;
-    }
-  );
-
-  readonly shouldShowOnboarding = derived(
-    this.store,
-    $state => {
-      // Only show onboarding if:
-      // 1. User is authenticated
-      // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Products loading is complete (productsLoaded: true)
-      // 4. Profile either doesn't exist or onboarding is not complete
-      // 5. We have waited long enough to ensure stable state (prevent flash)
-      const isAuthenticated = $state.isAuthenticated;
-      const profileLoaded = $state.profileLoaded;
-      const productsLoaded = $state.productsLoaded;
-      const profile = $state.profile;
-      const isInitialized = $state.isInitialized;
-
-      const result = isAuthenticated && profileLoaded && productsLoaded && (!profile || !profile.onboarding_complete);
-
-      // Don't show onboarding until everything is fully initialized
-      if (!isInitialized) {
-        return false;
-      }
-
-      // If profile or products are still loading, don't show onboarding yet to prevent flash
-      if (isAuthenticated && (!profileLoaded || !productsLoaded)) {
-        return false;
-      }
-
-      // Only show onboarding if authenticated, profile loaded, products loaded, and onboarding not complete
-      return result;
-    }
-  );
-
-  readonly shouldShowLogin = derived(
-    this.store,
-    $state => !$state.isAuthenticated && $state.isInitialized
-  );
-
-  /**
-   * Initialize the entire application authentication and data layer
-   */
-  async initialize(): Promise<InitializationResult> {
-    this.store.update(state => ({
-      ...state,
-      isLoading: true,
-      error: null,
-    }));
-
-    const result: InitializationResult = {
-      authReady: false,
-      profileReady: false,
-      productsReady: false,
-      stripeReady: false,
-      errors: []
-    };
-
-    try {
-      // Step 1: Initialize core systems
-      await storeManager.initialize();
-
-      // Step 2: Initialize authentication
-      const authSuccess = await this.initializeAuth();
-      result.authReady = authSuccess;
-
-      // Step 4: Load profile and products if authenticated
-      const stateAfterAuth = get(this.store);
-      if (stateAfterAuth.isAuthenticated && stateAfterAuth.user) {
-        try {
-          // Initialize data actions first
-          await dataActions.initialize();
-
-          // Load profile
-          const profile = await dataActions.getUserProfile(stateAfterAuth.user.id, false);
-
-          this.store.update(s => ({
-            ...s,
-            profile,
-            profileLoaded: true,
-            onboardingCompleted: profile?.onboarding_complete || false
-          }));
-          result.profileReady = !!profile;
-
-          // Step 5: Load products immediately after profile is loaded
-          try {
-            // Load products silently during initialization (no toast on error)
-            await purchaseManager.loadProducts(false, false);
-            this.store.update(s => ({ ...s, productsLoaded: true }));
-            result.productsReady = true;
-          } catch (productError) {
-            result.errors.push(`Failed to load products: ${productError}`);
-            // Mark as loaded even on failure to prevent blocking the app
-            this.store.update(s => ({ ...s, productsLoaded: true }));
-          }
-
-        } catch (error) {
-          result.errors.push(`Failed to load profile: ${error}`);
-          this.store.update(s => ({
-            ...s,
-            profileLoaded: true,
-            productsLoaded: true // Mark products as loaded too to prevent blocking
-          }));
+            // Reset auth state on cleanup
+            authCompleted = false;
+            isSwitchingInputs = false;
         }
-      } else {
-        // No user, mark both profile and products as "loaded" to prevent blocking
-        this.store.update(s => ({
-          ...s,
-          profileLoaded: true,
-          productsLoaded: true
-        }));
-        result.profileReady = true;
-        result.productsReady = true;
-      }
-
-      // Step 5: Wait a moment for all async operations to complete
-      await new Promise(resolve => setTimeout(resolve, 150));
-
-      // Step 6: Mark as initialized
-      this.store.update(state => ({
-        ...state,
-        isInitialized: true,
-        isLoading: false
-      }));
-
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      result.errors.push(errorMessage);
-
-      this.store.update(state => ({
-        ...state,
-        error: errorMessage,
-        isLoading: false,
-        isInitialized: true // Still mark as initialized to prevent loops
-      }));
-    }
-
-    return result;
-  }
-
-  /**
-   * Initialize authentication layer
-   */
-  private async initializeAuth(): Promise<boolean> {
-    try {
-      // Load session data from persistent store
-      await sessionStore.load();
-
-      // Check if we have valid stored session
-      const hasValidSession = await sessionStore.hasValidSession();
-
-      if (hasValidSession) {
-        // Try to restore session from stored tokens
-        const tokens = await sessionStore.getStoredTokens();
-        if (tokens) {
-          // Initialize Supabase client
-          if (!supabaseUrl || !supabaseAnonKey) {
-            throw new Error('Missing Supabase configuration');
-          }
-          
-          const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
-          
-          // Restore session if available
-          const { data: { session } } = await supabaseClient.auth.getSession();
-          if (session) {
-            await sessionStore.setAuthenticated(session.user, session);
-          }
-        }
-      }
-
-      // No valid session found, check current Supabase session
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
-
-      if (currentSession) {
-        // Store the current session tokens
-        await this.setAuthenticated(currentSession.user, currentSession);
-        return true;
-      } else {
-        // No session found
-        await this.setUnauthenticated();
-        return true;
-      }
-    } catch (error) {
-      await this.setUnauthenticated(
-        error instanceof Error ? error.message : 'Authentication failed'
-      );
-      return false;
-    }
-  }
-
-  /**
-   * Set authenticated state
-   */
-  private async setAuthenticated(user: User, session: AuthSession): Promise<void> {
-    const now = Date.now();
-
-    this.store.update(state => ({
-      ...state,
-      user,
-      session,
-      isAuthenticated: true,
-      isLoading: false,
-      error: null,
-      lastActivity: now,
-      tokenExpiresAt: session.expires_at ? session.expires_at * 1000 : null
-    }));
-
-    // Store tokens securely in Tauri and session store
-    try {
-      await sessionStore.setAuthenticated(user, session);
-    } catch (error) {
-      throw new Error(`Database error saving new user: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-
-    // Wait longer for session store to be fully written and profile to load
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    // Initialize user store with authenticated user
-    try {
-      await userStore.initialize(user.id);
-    } catch (error) {
-      // For new users, this is expected - they don't have database records yet
-      // Don't fail authentication if user store initialization fails
-    }
-
-    // Load user profile data
-    try {
-      await this.refreshProfile();
-
-      // After profile refresh, check if onboarding is completed
-      const state = get(this.store);
-      if (state.profile && state.profile.onboarding_complete) {
-        this.store.update(s => ({ ...s, onboardingCompleted: true }));
-      }
-
-      // Load products after profile is loaded
-      try {
-        await purchaseManager.loadProducts(false, false); // Silent loading
-        this.store.update(s => ({ ...s, productsLoaded: true }));
-      } catch (productError) {
-        // Mark as loaded even on failure to prevent blocking
-        this.store.update(s => ({ ...s, productsLoaded: true }));
-        console.warn('Failed to load products during authentication:', productError);
-      }
-
-    } catch (error) {
-      // Don't fail authentication if profile loading fails
-      // This is expected for new users who haven't created a profile yet
-      // But we still need to mark profile and products as loaded to prevent inconsistent state
-      this.store.update(s => ({
-        ...s,
-        profileLoaded: true,
-        productsLoaded: true
-      }));
-    }
-
-    // Start background IAP sync after authentication
-    this.startBackgroundIAPSync(user.id);
-
-    // Start token refresh monitoring
-    this.scheduleTokenRefresh();
-  }
-
-  /**
-   * Set unauthenticated state
-   */
-  private async setUnauthenticated(error?: string): Promise<void> {
-    // Clear timers
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
-    if (this.iapSyncTimer) {
-      clearTimeout(this.iapSyncTimer);
-      this.iapSyncTimer = null;
-    }
-
-    // Reset user store
-    try {
-      userStore.reset();
-    } catch (error) {
-    }
-
-    this.store.update(state => ({
-      ...state,
-      user: null,
-      session: null,
-      isAuthenticated: false,
-      isLoading: false,
-      error: error || null,
-      profile: null,
-      profileLoaded: false,
-      onboardingCompleted: false,
-      currentOnboardingStep: 1,
-      productsLoaded: false,
-      lastActivity: null,
-      tokenExpiresAt: null
-    }));
-
-    // Clear session store
-    await sessionStore.setUnauthenticated(error);
-  }
-
-  /**
-   * Schedule token refresh
-   */
-  private scheduleTokenRefresh(): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-    }
-
-    const state = get(this.store);
-    if (!state.tokenExpiresAt) return;
-
-    // Refresh 5 minutes before expiry
-    const refreshTime = state.tokenExpiresAt - Date.now() - (5 * 60 * 1000);
-
-    if (refreshTime > 0) {
-      this.refreshTimer = setTimeout(() => {
-        this.refreshSession().catch(() => {});
-      }, refreshTime);
-    }
-  }
-
-  /**
-   * Handle user sign up with email and password
-   */
-  async handleSignUp(email: string, password: string): Promise<void> {
-    // loadingActions.showAuth();
-    this.store.update(state => ({ ...state, isLoading: true, error: null }));
-
-    try {
-      // Direct Supabase auth
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-      
-      const { data, error } = await supabaseClient.auth.signUp({
-        email,
-        password
-      });
-      
-      if (error) {
-        throw new Error(error.message);
-      }
-      
-      if (data.user && data.session) {
-        await this.setAuthenticated(data.user, data.session);
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Sign up failed';
-      this.store.update(state => ({
-        ...state,
-        error: errorMessage,
-        isLoading: false
-      }));
-      throw error;
-    } finally {
-      this.store.update(state => ({ ...state, isLoading: false }));
-    }
-  }
-
-  /**
-   * Handle user login with email and password
-   */
-  async handleLogin(email: string, password: string): Promise<void> {
-    // loadingActions.showAuth();
-    this.store.update(state => ({ ...state, isLoading: true, error: null }));
-
-    try {
-      // Direct Supabase auth
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-      
-      const { data, error } = await supabaseClient.auth.signInWithPassword({
-        email,
-        password
-      });
-      
-      if (error) {
-        throw new Error(error.message);
-      }
-      
-      if (data.user && data.session) {
-        await this.setAuthenticated(data.user, data.session);
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Login failed';
-      this.store.update(state => ({
-        ...state,
-        error: errorMessage,
-        isLoading: false
-      }));
-      throw error;
-    } finally {
-      this.store.update(state => ({ ...state, isLoading: false }));
-    }
-  }
-
-  /**
-   * Handle user logout
-   */
-  async handleLogout(): Promise<void> {
-    // Always force complete logout regardless of errors
-    try {
-      // Step 1: Clear Supabase session
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-      
-      // Try both global and local signout
-      await Promise.allSettled([
-        supabaseClient.auth.signOut(),
-        supabaseClient.auth.signOut({ scope: 'local' })
-      ]);
-    } catch (error) {
-      // Ignore Supabase errors - we'll force cleanup anyway
-    }
-
-    try {
-      // Step 2: Clear session store
-      await sessionStore.setUnauthenticated();
-    } catch (error) {
-      // Session store cleanup failed, continue anyway
-    }
-
-    // Step 3: Force clear all auth state (always runs)
-    await this.setUnauthenticated();
-
-    // Step 4: Navigate to root and final cleanup
-    try {
-      await goto('/');
-    } catch (error) {
-      // Navigation failed, continue anyway
-    }
-    
-    this.store.update(state => ({ 
-      ...state, 
-      isLoading: false,
-      isInitialized: true // Keep initialized to prevent re-init loops
-    }));
-  }
-
-  /**
-   * Refresh session
-   */
-  async refreshSession(): Promise<void> {
-    try {
-      const { data, error } = await supabase.auth.refreshSession();
-
-      if (error) {
-        throw new Error(error.message);
-      }
-
-      if (data.session && data.user) {
-        await this.setAuthenticated(data.user, data.session);
-      }
-    } catch (error) {
-      // If refresh fails, logout
-      await this.handleLogout();
-      throw error;
-    }
-  }
-
-  /**
-   * Refresh user profile
-   */
-  async refreshProfile(): Promise<void> {
-    const state = get(this.store);
-
-    if (!state.isAuthenticated || !state.user?.id) {
-      return;
-    }
-
-    try {
-      const profile = await dataActions.getUserProfile(state.user.id, true); // Force refresh
-
-      this.store.update(s => ({ ...s, profile, profileLoaded: true }));
-    } catch (error) {
-      // Even on failure, mark profile as loaded to prevent UI getting stuck
-      this.store.update(s => ({ ...s, profileLoaded: true }));
-      throw error;
-    }
-  }
-
-  /**
-   * Handle onboarding completion
-   */
-  async completeOnboarding(): Promise<void> {
-    // Mark onboarding as completed in the store
-    this.store.update(state => ({ ...state, onboardingCompleted: true }));
-    await this.refreshProfile();
-  }
-
-  /**
-   * Check if onboarding is completed
-   */
-  isOnboardingCompleted(): boolean {
-    return get(this.store).onboardingCompleted;
-  }
-
-  /**
-   * Mark onboarding as completed
-   */
-  markOnboardingCompleted(): void {
-    this.store.update(state => ({ ...state, onboardingCompleted: true }));
-  }
-
-  /**
-   * Get current onboarding step
-   */
-  getCurrentOnboardingStep(): number {
-    return get(this.store).currentOnboardingStep;
-  }
-
-  /**
-   * Set current onboarding step
-   */
-  setCurrentOnboardingStep(step: number): void {
-    this.store.update(state => ({ ...state, currentOnboardingStep: step }));
-  }
-
-  /**
-   * Reset onboarding completion state
-   */
-  resetOnboardingState(): void {
-    this.store.update(state => ({
-      ...state,
-      onboardingCompleted: false,
-      currentOnboardingStep: 1
-    }));
-  }
-
-  /**
-   * Get current auth state
-   */
-  async getState(): Promise<UnifiedAuthState> {
-    return get(this.store);
-  }
-
-  /**
-   * Clear any errors
-   */
-  clearError(): void {
-    this.store.update(state => ({ ...state, error: null }));
-  }
-
-  /**
-   * Clear error (alias for legacy compatibility)
-   */
-  async clearErrorAsync(): Promise<void> {
-    this.clearError();
-  }
-
-  /**
-   * Get current user (for legacy compatibility)
-   */
-  getCurrentUser() {
-    return supabase.auth.getUser();
-  }
-
-  /**
-   * Legacy compatibility methods
-   */
-  async login(email: string, password: string): Promise<void> {
-    return this.handleLogin(email, password);
-  }
-
-  async signUp(email: string, password: string): Promise<void> {
-    return this.handleSignUp(email, password);
-  }
-
-  async logout(): Promise<void> {
-    return this.handleLogout();
-  }
-
-  /**
-   * Force re-initialization (for development/debugging)
-   */
-  async reinitialize(): Promise<InitializationResult> {
-    this.store.update(state => ({
-      ...state,
-      isInitialized: false,
-      isLoading: true,
-      error: null
-    }));
-
-    return this.initialize();
-  }
-
-  /**
-   * Start background IAP synchronization
-   */
-  private startBackgroundIAPSync(userId: string): void {
-    // Clear existing timer
-    if (this.iapSyncTimer) {
-      clearTimeout(this.iapSyncTimer);
-    }
-
-    // Initial sync after 10 seconds to allow IAP store to initialize
-    setTimeout(async () => {
-      try {
-        await syncSubscriptionsWithIAP(userId);
-      } catch (error) {
-      }
-    }, 10000);
-
-    // Set up periodic sync every 3 minutes
-    const syncInterval = () => {
-      this.iapSyncTimer = setTimeout(async () => {
-        try {
-          await syncSubscriptionsWithIAP(userId);
-        } catch (error) {
-        }
-        // Schedule next sync
-        syncInterval();
-      }, 3 * 60 * 1000); // 3 minutes
-    };
-
-    // Start the interval
-    syncInterval();
-  }
-
-  /**
-   * Destroy store and cleanup
-   */
-  destroy(): void {
-    if (this.refreshTimer) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
-    }
-    if (this.iapSyncTimer) {
-      clearTimeout(this.iapSyncTimer);
-      this.iapSyncTimer = null;
-    }
-  }
-}
-
-// Create and export the unified auth store
-export const authStore = new UnifiedAuthStore();
-
-// Export as centralizedAuth for backward compatibility
-export const centralizedAuth = authStore;
-
-// Export types
-export type { UnifiedAuthState };
+    });
+</script>
+
+<!-- Full-Screen Login Overlay -->
+<div class="min-h-screen flex flex-col safe-area-inset">
+    <!-- Main Content Container with Background Image -->
+    <Card class="flex-1 relative overflow-hidden mx-3 sm:mx-4 my-3 sm:my-4 shadow-2xl max-h-[70vh] sm:max-h-[75vh] border-0">
+        <!-- Background Image -->
+        <div class="absolute inset-0 bg-gradient-to-b from-slate-400 via-slate-700 to-slate-900">
+            <!-- Robot silhouette overlay -->
+            <div class="absolute inset-0 bg-cover bg-center opacity-40" style="background-image: url('/robot.png');"></div>
+        </div>
+
+        <!-- Content positioned at bottom of image -->
+        <CardContent class="absolute inset-0 flex flex-col justify-end p-4 sm:p-6">
+            <!-- Auth Mode Tabs -->
+            <div class="flex justify-center mb-4 sm:mb-6">
+                <Tabs bind:value={authMode} class="w-3/4 sm:w-1/2 max-w-xs">
+                    <TabsList class="grid w-full grid-cols-2 bg-muted/80">
+                        <TabsTrigger value="signup" class="text-xs sm:text-sm font-semibold">
+                            Sign Up
+                        </TabsTrigger>
+                        <TabsTrigger value="login" class="text-xs sm:text-sm font-semibold">
+                            Log In
+                        </TabsTrigger>
+                    </TabsList>
+                </Tabs>
+            </div>
+
+            <!-- Form Container -->
+            <form class="flex justify-center" on:submit={handleFormSubmit}>
+                <div class="w-full max-w-sm px-2">
+                    <!-- Email Input -->
+                    <div class="mb-3 sm:mb-4">
+                        <Input
+                            type="email"
+                            bind:value={email}
+                            placeholder="Email"
+                            class="rounded-xl text-sm sm:text-base"
+                            disabled={loginLoading}
+                            onfocus={handleInputFocus}
+                            onblur={handleInputBlur}
+                        />
+                    </div>
+
+                    <!-- Password Input -->
+                    <div class="mb-4 sm:mb-5 relative">
+                        <Input
+                            type={showPassword ? "text" : "password"}
+                            bind:value={password}
+                            placeholder="Password"
+                            class="rounded-xl text-sm sm:text-base pr-10 sm:pr-12"
+                            disabled={loginLoading}
+                            onfocus={handleInputFocus}
+                            onblur={handleInputBlur}
+                        />
+                        <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            class="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 p-0 text-muted-foreground hover:text-foreground"
+                            onclick={togglePassword}
+                        >
+                            {#if showPassword}
+                                <svg
+                                    class="w-3 h-3 sm:w-4 sm:h-4"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    viewBox="0 0 24 24"
+                                >
+                                    <path
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        stroke-width="2"
+                                        d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21"
+                                    ></path>
+                                </svg>
+                            {:else}
+                                <svg
+                                    class="w-3 h-3 sm:w-4 sm:h-4"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    viewBox="0 0 24 24"
+                                >
+                                    <path
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        stroke-width="2"
+                                        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                                    ></path>
+                                    <path
+                                        stroke-linecap="round"
+                                        stroke-linejoin="round"
+                                        stroke-width="2"
+                                        d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                                    ></path>
+                                </svg>
+                            {/if}
+                        </Button>
+                    </div>
+
+                    <!-- Auth Button -->
+                    <Button
+                        type="submit"
+                        disabled={loginLoading || !isFormValid}
+                        class="w-full py-3 sm:py-4 text-sm sm:text-base font-semibold rounded-xl"
+                        size="lg"
+                    >
+                        {#if loginLoading}
+                            <span class="loading loading-spinner loading-sm sm:loading-md"></span>
+                            Loading...
+                        {:else}
+                            {authMode === "signup" ? "Sign Up" : "Log In"}
+                        {/if}
+                    </Button>
+                </div>
+            </form>
+        </CardContent>
+    </Card>
+
+    <!-- OR ACCESS WITH - Outside the card -->
+    <div class="text-center mt-4 sm:mt-6 mb-4 sm:mb-6">
+        <p class="text-muted-foreground text-xs font-medium tracking-wide">
+            OR ACCESS WITH
+        </p>
+    </div>
+
+    <!-- Social Login Buttons - Outside the card -->
+    <div class="flex justify-center gap-4 sm:gap-5 mb-4 sm:mb-6 pb-safe">
+        <Button
+            variant="outline"
+            size="icon"
+            onclick={handleAppleSignIn}
+            class="rounded-full w-12 h-12 sm:w-14 sm:h-14 shadow-sm"
+            aria-label="Sign in with Apple"
+        >
+            <svg
+                class="w-5 h-5 sm:w-6 sm:h-6"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+            >
+                <path
+                    d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"
+                />
+            </svg>
+        </Button>
+
+        <Button
+            variant="outline"
+            size="icon"
+            onclick={handleFacebookSignIn}
+            class="rounded-full w-12 h-12 sm:w-14 sm:h-14 shadow-sm"
+            aria-label="Sign in with Facebook"
+        >
+            <svg
+                class="w-5 h-5 sm:w-6 sm:h-6 text-[#1877F2]"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+            >
+                <path
+                    d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"
+                />
+            </svg>
+        </Button>
+
+        <Button
+            variant="outline"
+            size="icon"
+            onclick={handleGoogleSignIn}
+            class="rounded-full w-12 h-12 sm:w-14 sm:h-14 shadow-sm"
+            aria-label="Sign in with Google"
+        >
+            <svg class="w-5 h-5 sm:w-6 sm:h-6" viewBox="0 0 24 24">
+                <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                />
+                <path
+                    fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                />
+                <path
+                    fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                />
+                <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                />
+            </svg>
+        </Button>
+    </div>
+</div>
