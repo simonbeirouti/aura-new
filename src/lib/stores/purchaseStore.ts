@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { cacheManager, cacheKeys } from './cacheManager';
 import { createEnhancedStore, storeManager } from './core/storeManager';
 import { toast } from 'svelte-sonner';
+import { loadingStore } from './loadingStore';
 import type { Product } from './userStore';
 
 // Purchase state interface
@@ -50,8 +51,11 @@ class PurchaseManager {
     return this.store.subscribe;
   }
 
-  // Load products with caching
-  async loadProducts(forceRefresh = false): Promise<void> {
+  // Load products with caching and loading state management
+  async loadProducts(forceRefresh = false, showToastOnError = true): Promise<void> {
+    // Use loadingStore for consistent loading state
+    loadingStore.show({ id: 'products' });
+
     this.store.update(state => ({ ...state, loading: true, error: null }));
 
     try {
@@ -61,38 +65,47 @@ class PurchaseManager {
         // Try to get from cache first
         const cached = cacheManager.get<Product[]>(PRODUCTS_CACHE_KEY);
         if (cached) {
-          this.store.update(state => ({ 
-            ...state, 
-            products: cached, 
+          this.store.update(state => ({
+            ...state,
+            products: cached,
             loading: false,
             lastUpdated: Date.now()
           }));
+          loadingStore.hide('products');
           return;
         }
       }
 
       // Load from backend
       products = await invoke<Product[]>('get_products');
-      
+
       // Cache the results
       cacheManager.set(PRODUCTS_CACHE_KEY, products, PRODUCTS_CACHE_TTL);
 
-      this.store.update(state => ({ 
-        ...state, 
-        products, 
+      this.store.update(state => ({
+        ...state,
+        products,
         loading: false,
         lastUpdated: Date.now()
       }));
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Failed to load products';
-      this.store.update(state => ({ 
-        ...state, 
-        error: errorMessage, 
-        loading: false 
+      this.store.update(state => ({
+        ...state,
+        error: errorMessage,
+        loading: false
       }));
-      toast.error('Failed to load products');
+
+      // Only show toast if explicitly requested (not during initial auth)
+      if (showToastOnError) {
+        toast.error('Failed to load products');
+      }
+
       console.error('Failed to load products:', err);
+      throw err; // Re-throw to allow calling code to handle
+    } finally {
+      loadingStore.hide('products');
     }
   }
 
@@ -155,9 +168,9 @@ class PurchaseManager {
   }
 
   // Refresh products if needed
-  async refreshIfNeeded(): Promise<void> {
+  async refreshIfNeeded(showToastOnError = true): Promise<void> {
     if (this.shouldRefresh()) {
-      await this.loadProducts(true);
+      await this.loadProducts(true, showToastOnError);
     }
   }
 
@@ -225,22 +238,5 @@ export const productsByCategory = derived(
   }
 );
 
-// Initialize store conditionally based on auth state
-if (typeof window !== 'undefined') {
-  // Import auth store to check authentication status
-  import('./unifiedAuth.js').then(({ authStore }) => {
-    // Subscribe to auth changes and load products when authenticated
-    authStore.subscribe((authState) => {
-      if (authState.isAuthenticated && authState.user) {
-        // Only load products if we haven't loaded them yet or if we need a refresh
-        if (purchaseManager.shouldRefresh()) {
-          purchaseManager.loadProducts().catch(() => {
-            // Silently handle errors - they're already logged in loadProducts
-          });
-        }
-      }
-    });
-  }).catch(() => {
-    // Auth store not available, skip auto-loading
-  });
-}
+// Product loading is now handled by unifiedAuth initialization
+// to prevent loading during auth completion and ensure consistent state management

@@ -76,7 +76,6 @@
       const success = await biometricActions.authenticate('Authenticate to access your secure data');
       
       if (success) {
-        toast.success('Biometric authentication successful');
         biometricAuthComplete = true;
       } else {
         toast.error('Biometric authentication failed. Please try again.');

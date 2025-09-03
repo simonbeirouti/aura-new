@@ -135,7 +135,7 @@ class DataStore {
 
   // Database connection management
   private async ensureDatabaseConnection() {
-    loadingActions.showDatabase('Initializing database connection...');
+    loadingActions.showDatabase();
     
     try {
       // Check if we have valid session tokens
@@ -237,7 +237,7 @@ class DataStore {
   }
 
   async getUserProfile(userId: string, useCache: boolean = true): Promise<Profile | null> {
-    loadingActions.showDatabase('Loading profile...');
+    loadingActions.showDatabase();
     
     try {
       // Check cache first if enabled

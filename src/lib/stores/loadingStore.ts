@@ -3,7 +3,6 @@ import { writable } from 'svelte/store';
 // Loading state interface
 export interface LoadingState {
   isLoading: boolean;
-  message: string;
   progress?: number; // Optional progress percentage (0-100)
   canCancel?: boolean;
   id?: string; // Unique identifier for the loading operation
@@ -12,7 +11,6 @@ export interface LoadingState {
 // Initial loading state
 const initialLoadingState: LoadingState = {
   isLoading: false,
-  message: '',
   progress: undefined,
   canCancel: false,
   id: undefined
@@ -28,21 +26,20 @@ function createLoadingStore() {
   return {
     subscribe,
     
-    // Show loading with message
-    show: (message: string = 'Loading...', options?: Partial<LoadingState>) => {
+    // Show loading
+    show: (options?: Partial<LoadingState>) => {
       const loadingState: LoadingState = {
         isLoading: true,
-        message,
         progress: options?.progress,
         canCancel: options?.canCancel || false,
         id: options?.id || `loading_${Date.now()}`
       };
-      
+
       loadingStack.push(loadingState);
       set(loadingState);
     },
     
-    // Update current loading message/progress
+    // Update current loading progress
     update: (updates: Partial<LoadingState>) => {
       if (loadingStack.length > 0) {
         const current = loadingStack[loadingStack.length - 1];
@@ -90,13 +87,12 @@ function createLoadingStore() {
     // Async wrapper for operations
     async wrap<T>(
       operation: () => Promise<T>,
-      message: string = 'Loading...',
       options?: Partial<LoadingState>
     ): Promise<T> {
       const id = `wrap_${Date.now()}`;
-      
+
       try {
-        this.show(message, { ...options, id });
+        this.show({ ...options, id });
         const result = await operation();
         return result;
       } finally {
@@ -112,26 +108,26 @@ export const loadingStore = createLoadingStore();
 // Convenience functions for common loading scenarios
 export const loadingActions = {
   // Authentication loading
-  showAuth: (message: string = 'Authenticating...') => 
-    loadingStore.show(message, { id: 'auth' }),
-  hideAuth: () => 
+  showAuth: () =>
+    loadingStore.show({ id: 'auth' }),
+  hideAuth: () =>
     loadingStore.hide('auth'),
-  
+
   // Profile loading
-  showProfile: (message: string = 'Loading profile...') => 
-    loadingStore.show(message, { id: 'profile' }),
-  hideProfile: () => 
+  showProfile: () =>
+    loadingStore.show({ id: 'profile' }),
+  hideProfile: () =>
     loadingStore.hide('profile'),
-  
+
   // Database operations
-  showDatabase: (message: string = 'Saving...') => 
-    loadingStore.show(message, { id: 'database' }),
-  hideDatabase: () => 
+  showDatabase: () =>
+    loadingStore.show({ id: 'database' }),
+  hideDatabase: () =>
     loadingStore.hide('database'),
-  
+
   // General app loading
-  showApp: (message: string = 'Loading application...') => 
-    loadingStore.show(message, { id: 'app' }),
-  hideApp: () => 
+  showApp: () =>
+    loadingStore.show({ id: 'app' }),
+  hideApp: () =>
     loadingStore.hide('app')
 };
