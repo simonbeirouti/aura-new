@@ -16,13 +16,44 @@
     initializeCommonActionTypes,
   } from "$lib/stores/notificationStore";
   import { Button } from "$lib/components/ui/button";
+  import { centralizedAuth } from "$lib/stores/unifiedAuth";
 
   let permissionGranted = false;
   let actionTypesInitialized = false;
 
+  // Reactive: Ensure products are loaded when user becomes authenticated
+  $: if ($centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized && $products.length === 0 && !$productsLoading) {
+    // Small delay to ensure other initialization is complete
+    setTimeout(async () => {
+      if ($products.length === 0 && !$productsLoading) {
+        try {
+          await purchaseManager.loadProducts(false, false);
+        } catch (error) {
+          // If that fails, try force refresh
+          try {
+            await purchaseManager.loadProducts(true, false);
+          } catch (retryError) {
+            // Continue silently on retry error
+          }
+        }
+      }
+    }, 1000); // Increased delay to ensure auth init is complete
+  }
+
   onMount(async () => {
-    // Products are now loaded during auth initialization
-    // No need to load them here again
+    // Ensure products are loaded - fallback if auth initialization didn't load them
+    if ($products.length === 0 && !$productsLoading) {
+      try {
+        await purchaseManager.loadProducts(false, false); // Don't force refresh, don't show toast
+      } catch (error) {
+        // Try again with force refresh as last resort
+        try {
+          await purchaseManager.loadProducts(true, false);
+        } catch (retryError) {
+          // Continue silently on retry error
+        }
+      }
+    }
 
     // Initialize notification system
     try {
@@ -34,7 +65,7 @@
         actionTypesInitialized = true;
       }
     } catch (error) {
-      console.error("Failed to initialize notifications:", error);
+      // Continue silently on notification initialization error
     }
   });
 
@@ -65,7 +96,6 @@
       const errorMessage =
         err instanceof Error ? err.message : "Purchase failed";
       toast.error(errorMessage);
-      console.error("Purchase failed:", err);
     }
   }
 
@@ -78,7 +108,6 @@
       );
     } catch (error) {
       toast.error("Failed to send message notification");
-      console.error("Message notification error:", error);
     }
   }
 
@@ -91,7 +120,6 @@
       );
     } catch (error) {
       toast.error("Failed to send reminder notification");
-      console.error("Reminder notification error:", error);
     }
   }
 
@@ -106,7 +134,6 @@
       }
     } catch (error) {
       toast.error("Failed to request permission");
-      console.error("Permission request error:", error);
     }
   }
 
@@ -118,7 +145,6 @@
       );
     } catch (error) {
       toast.error("Failed to send notification");
-      console.error("Instant notification error:", error);
     }
   }
 </script>
@@ -126,11 +152,7 @@
 <AppLayout>
   <div class="container mx-auto">
     <!-- Header Section -->
-    <div class="text-center mb-12">
-      <h1 class="text-4xl font-bold mb-4">Welcome to Aura Store</h1>
-      <p class="text-muted-foreground text-lg mb-6">
-        Enhance your experience with premium features and upgrades
-      </p>
+    <div class="text-center mb-8">
 
       <!-- Token Balance Display -->
       {#if $userStore.isInitialized}
@@ -182,6 +204,7 @@
           </div>
         {/if}
       </div>
+
     </div>
 
     <!-- Products Section -->
@@ -194,7 +217,16 @@
           <div
             class="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"
           ></div>
-          <p class="text-muted-foreground">Loading products...</p>
+          <p class="text-muted-foreground">
+            {#if $products.length === 0}
+              Loading products from server...
+            {:else}
+              Refreshing products...
+            {/if}
+          </p>
+          <p class="text-xs text-muted-foreground mt-2">
+            This may take a moment on first load
+          </p>
         </div>
       {/if}
 
@@ -212,6 +244,15 @@
       {/if}
 
       <!-- Products Grid -->
+      {#if !$productsLoading && !$productsError && $products.length > 0}
+        <div class="mb-4 text-center">
+          <span class="text-sm text-muted-foreground">
+            ✅ {$products.length} products loaded
+          </span>
+        </div>
+      {/if}
+
+      <!-- Products Grid (only show if loaded) -->
       {#if !$productsLoading && !$productsError && $products.length > 0}
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
           {#each $products as product}
@@ -261,12 +302,37 @@
       <!-- Empty State -->
       {#if !$productsLoading && !$productsError && $products.length === 0}
         <div class="text-center py-12">
-          <div class="text-6xl mb-4">🛍️</div>
-          <h3 class="text-xl font-semibold mb-2">No products available</h3>
+          <div class="text-6xl mb-4">
+            {#if $centralizedAuth.isAuthenticated}
+              🔄
+            {:else}
+              🔒
+            {/if}
+          </div>
+          <h3 class="text-xl font-semibold mb-2">
+            {#if $centralizedAuth.isAuthenticated}
+              Loading Products...
+            {:else}
+              Authentication Required
+            {/if}
+          </h3>
           <p class="text-muted-foreground mb-6">
-            Check back later for new items!
+            {#if $centralizedAuth.isAuthenticated}
+              Products are being loaded. This may take a moment on first visit.
+            {:else}
+              Please sign in to view available products.
+            {/if}
           </p>
-          <Button onclick={loadProducts}>Refresh</Button>
+          {#if $centralizedAuth.isAuthenticated}
+            <Button onclick={loadProducts} disabled={$productsLoading}>
+              {#if $productsLoading}
+                <span class="loading loading-spinner loading-sm mr-2"></span>
+                Loading...
+              {:else}
+                Retry Loading
+              {/if}
+            </Button>
+          {/if}
         </div>
       {/if}
     </div>

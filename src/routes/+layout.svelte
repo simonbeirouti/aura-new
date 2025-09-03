@@ -20,18 +20,7 @@
   $: shouldShowLogin = centralizedAuth.shouldShowLogin;
   $: isReady = centralizedAuth.isReady;
 
-  // Debug derived store values
-  $: console.log('Layout: Derived stores:', {
-    shouldShowApp,
-    shouldShowOnboarding,
-    shouldShowLogin,
-    isReady,
-    authState: {
-      isAuthenticated: $centralizedAuth.isAuthenticated,
-      isInitialized: $centralizedAuth.isInitialized,
-      isLoading: $centralizedAuth.isLoading
-    }
-  });
+  // Debug derived store values - logging removed for production
 
   let initializationComplete = false;
   let initializationErrors: string[] = [];
@@ -39,17 +28,14 @@
   let biometricAuthComplete = false;
 
   onMount(async () => {
-    console.log('Layout: onMount triggered');
     loadingActions.showApp();
 
     try {
       const result = await centralizedAuth.initialize();
-      console.log('Layout: Initialization result:', result);
-      
+
       if (result.errors.length > 0) {
         initializationErrors = result.errors;
-        console.error('Initialization errors:', result.errors);
-        
+
         // Show errors to user
         result.errors.forEach(error => {
           toast.error(`Initialization Error: ${error}`);
@@ -58,7 +44,6 @@
 
       // Initialize biometric store only if user is authenticated
       if (result.authReady && $centralizedAuth.isAuthenticated) {
-        console.log('Layout: Initializing biometric store');
         await biometricActions.initialize();
 
         // Only check for startup auth if biometric is actually enabled
@@ -71,20 +56,17 @@
           biometricAuthComplete = true;
         }
       } else {
-        console.log('Layout: Skipping biometric initialization - not authenticated');
         biometricAuthComplete = true;
       }
-      
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       initializationErrors = [errorMessage];
-      console.error('Layout: Failed to initialize application:', error);
       toast.error(`Failed to initialize: ${errorMessage}`);
       biometricAuthComplete = true;
     } finally {
       initializationComplete = true;
       loadingActions.hideApp();
-      console.log('Layout: Initialization complete');
     }
   });
 
@@ -101,7 +83,6 @@
         biometricAuthComplete = false;
       }
     } catch (error) {
-      console.error('Biometric authentication error:', error);
       toast.error(`Authentication error: ${error instanceof Error ? error.message : 'Unknown error'}`);
       // Don't mark as complete - keep prompting
       biometricAuthComplete = false;
@@ -131,7 +112,6 @@
           loadingActions.hideApp();
         }, 200);
       } catch (error) {
-        console.error('Error completing onboarding:', error);
         loadingActions.hideApp();
       }
     }, 300);
@@ -182,26 +162,14 @@
   {:else}
     <!-- Conditionally render onboarding component based on auth state -->
     {#if $shouldShowOnboarding || $shouldShowLogin}
-      {console.log('Layout: Showing onboarding (primary condition)')}
       <Onboarding on:complete={handleOnboardingComplete} />
     {:else if !$shouldShowApp && !$centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized}
-      {console.log('Layout: Showing onboarding (fallback condition)')}
       <!-- Fallback: Show onboarding when not authenticated but initialized -->
       <Onboarding on:complete={handleOnboardingComplete} />
-    {:else}
-      {console.log('Layout: No content to show', {
-        shouldShowOnboarding: $shouldShowOnboarding,
-        shouldShowLogin: $shouldShowLogin,
-        shouldShowApp: $shouldShowApp,
-        isAuthenticated: $centralizedAuth.isAuthenticated,
-        isInitialized: $centralizedAuth.isInitialized,
-        biometricAuthComplete
-      })}
     {/if}
 
     <!-- Main app content - only show when authenticated and onboarding complete -->
     {#if $shouldShowApp && biometricAuthComplete}
-      {console.log('Layout: Showing main app content')}
       <div in:fade={{ duration: 400 }}>
         <SubscriptionManager />
 

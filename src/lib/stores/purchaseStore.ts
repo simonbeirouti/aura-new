@@ -27,8 +27,15 @@ const initialState: PurchaseState = {
 };
 
 // Cache configuration for products
-const PRODUCTS_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const PRODUCTS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours (daily)
 const PRODUCTS_CACHE_KEY = 'products_list';
+
+// Helper function to check if it's a new day
+function isNewDay(lastUpdated: number): boolean {
+  const lastUpdateDate = new Date(lastUpdated);
+  const today = new Date();
+  return lastUpdateDate.toDateString() !== today.toDateString();
+}
 
 // Create enhanced purchase store
 const purchaseStore = createEnhancedStore('purchase_store', initialState, {
@@ -102,7 +109,6 @@ class PurchaseManager {
         toast.error('Failed to load products');
       }
 
-      console.error('Failed to load products:', err);
       throw err; // Re-throw to allow calling code to handle
     } finally {
       loadingStore.hide('products');
@@ -144,7 +150,6 @@ class PurchaseManager {
       
       // Show toast error instead of storing in state
       toast.error(`Purchase failed: ${errorMessage}`);
-      console.error('Purchase failed:', err);
       throw err;
     } finally {
       this.store.update(state => ({
@@ -160,11 +165,17 @@ class PurchaseManager {
     return state.products.find(p => p.id === productId);
   }
 
-  // Check if products need refresh
+  // Check if products need refresh (daily or if cache expired)
   shouldRefresh(): boolean {
     const state = get(this.store);
     const cacheAge = Date.now() - state.lastUpdated;
-    return cacheAge > PRODUCTS_CACHE_TTL || !cacheManager.has(PRODUCTS_CACHE_KEY);
+
+    // Force refresh if it's a new day or cache is expired
+    const needsDailyRefresh = state.lastUpdated > 0 && isNewDay(state.lastUpdated);
+    const cacheExpired = cacheAge > PRODUCTS_CACHE_TTL;
+    const noCache = !cacheManager.has(PRODUCTS_CACHE_KEY);
+
+    return needsDailyRefresh || cacheExpired || noCache;
   }
 
   // Refresh products if needed
