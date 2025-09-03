@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { createEventDispatcher } from "svelte";
+    import { createEventDispatcher, onMount } from "svelte";
     import { centralizedAuth } from "../stores/unifiedAuth";
     import { loadingActions } from "../stores/loadingStore";
     import OnboardingIntro from "./onboarding/OnboardingIntro.svelte";
@@ -16,20 +16,29 @@
     let onboardingComplete = $state(false);
     let currentStep = $state(1);
     
-    // const shouldShowApp = centralizedAuth.shouldShowApp;
+    const shouldShowApp = centralizedAuth.shouldShowApp;
 
     // Sync local states with centralized auth state
     $effect(() => {
         const wasCompleted = onboardingComplete;
         onboardingComplete = centralizedAuth.isOnboardingCompleted();
 
+        // If onboarding was just marked as completed, dispatch the complete event
         if (!wasCompleted && onboardingComplete) {
             dispatch('complete');
         }
     });
 
     $effect(() => {
-        currentStep = centralizedAuth.getCurrentOnboardingStep();
+        const centralizedStep = centralizedAuth.getCurrentOnboardingStep();
+        if (centralizedStep !== currentStep) {
+            currentStep = centralizedStep;
+        }
+    });
+    
+    onMount(() => {
+        // The reactive effect above will sync with the centralized auth state
+        // and dispatch 'complete' if onboarding was previously completed
     });
     
     let wasAuthenticated = $state(false);
@@ -66,6 +75,8 @@
         if (currentStep < totalSteps) {
             const newStep = currentStep + 1;
             centralizedAuth.setCurrentOnboardingStep(newStep);
+            // Force local update for immediate UI response
+            currentStep = newStep;
         }
     }
 
@@ -73,6 +84,8 @@
         if (currentStep > 1) {
             const newStep = currentStep - 1;
             centralizedAuth.setCurrentOnboardingStep(newStep);
+            // Force local update for immediate UI response
+            currentStep = newStep;
         }
     }
 
@@ -171,10 +184,10 @@
                 {/if}
             </div>
 
-            <!-- Bottom Section: Indicator and Buttons (only for steps 1-3) -->
-            {#if currentStep <= 3}
+            <!-- Bottom Section: Indicator and Buttons (only for steps 1-2, step 3 handles its own navigation) -->
+            {#if currentStep <= 2}
                 <div class="w-full mx-auto">
-                    <!-- Progress Indicator -->
+                    <!-- Progress Indicator (showing steps 1-2-3, but navigation only for 1-2) -->
                     <div class="flex justify-center gap-2 mb-16">
                         {#each Array(3) as _, i}
                             <div
