@@ -24,9 +24,6 @@
     // Show content immediately if we have cached data, regardless of loading state
     $: showContent = profile !== null;
     $: showLoading = isProfileLoading && !profile;
-    
-    // Add subtle loading indicator when refreshing in background
-    $: isBackgroundRefreshing = isProfileLoading && profile !== null;
 
     onMount(() => {
         // Always try to load cached data first (non-blocking)

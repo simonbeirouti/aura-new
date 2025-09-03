@@ -1,7 +1,7 @@
 import { writable, derived } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { registerActionTypes, onAction } from '@tauri-apps/plugin-notification';
+import { registerActionTypes } from '@tauri-apps/plugin-notification';
 
 export interface NotificationSettings {
   enabled: boolean;
@@ -214,46 +214,38 @@ export const notificationActions = {
   // Initialize notification listeners
   initializeListeners: async () => {
     try {
-      // Listen for notification actions using the plugin's onAction
-      await onAction((notification: any) => {
-        console.log('Notification action performed:', notification);
-        
+      // Listen for backend events only (avoid plugin's onAction which causes issues)
+      const unlistenAction = await listen('notification-action-performed', (event) => {
+        const payload = event.payload as any;
+        const actionId = payload.actionId || 'unknown';
+
         // Add to in-app notifications for tracking
         inAppNotifications.add({
           title: 'Action Performed',
-          body: `Action "${notification.actionId || 'unknown'}" was performed`,
+          body: `Action "${actionId}" was performed`,
           actions: []
         });
-        
+
         // Handle specific actions
-        if (notification.actionId) {
-          switch (notification.actionId) {
-            case 'reply':
-              console.log('Reply action with input:', notification.input || '');
-              break;
-            case 'mark-read':
-              console.log('Mark as read action');
-              break;
-            default:
-              console.log('Unknown action:', notification.actionId);
-          }
+        switch (actionId) {
+          case 'reply':
+            break;
+          case 'mark-read':
+            break;
+          default:
+            break;
         }
       });
 
-      // Listen for backend events
-      await listen('notification-action-performed', (event) => {
-        console.log('Backend notification action:', event.payload);
-      });
-
-      await listen('notification-clicked', (event) => {
-        console.log('Notification clicked:', event.payload);
+      const unlistenClick = await listen('notification-clicked', (event) => {
         inAppNotifications.add({
           title: 'Notification Clicked',
           body: `Notification was clicked`,
         });
       });
 
-      console.log('Notification listeners initialized');
+      // Store unlisteners for cleanup if needed
+      (window as any).notificationUnlisteners = [unlistenAction, unlistenClick];
     } catch (error) {
       console.error('Failed to initialize notification listeners:', error);
     }
@@ -264,7 +256,6 @@ export const notificationActions = {
 export const initializeCommonActionTypes = async (): Promise<void> => {
   try {
     await notificationActions.registerActionTypes(commonActionTypes);
-    console.log('Common action types registered successfully');
   } catch (error) {
     console.error('Failed to register common action types:', error);
   }

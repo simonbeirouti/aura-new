@@ -225,7 +225,22 @@ export const productsByCategory = derived(
   }
 );
 
-// Initialize store on module load
+// Initialize store conditionally based on auth state
 if (typeof window !== 'undefined') {
-  purchaseManager.loadProducts();
+  // Import auth store to check authentication status
+  import('./unifiedAuth.js').then(({ authStore }) => {
+    // Subscribe to auth changes and load products when authenticated
+    authStore.subscribe((authState) => {
+      if (authState.isAuthenticated && authState.user) {
+        // Only load products if we haven't loaded them yet or if we need a refresh
+        if (purchaseManager.shouldRefresh()) {
+          purchaseManager.loadProducts().catch(() => {
+            // Silently handle errors - they're already logged in loadProducts
+          });
+        }
+      }
+    });
+  }).catch(() => {
+    // Auth store not available, skip auto-loading
+  });
 }

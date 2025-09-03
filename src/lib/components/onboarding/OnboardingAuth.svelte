@@ -17,6 +17,8 @@
     let showPassword = false;
     let initialViewportHeight = 0;
     let currentViewportHeight = 0;
+    let authCompleted = false; // Track when auth is successfully completed
+    let isSwitchingInputs = false; // Track when switching between form inputs
 
     // Login validation functions
     function isValidEmail(email: string): boolean {
@@ -64,6 +66,9 @@
 
     function handleInputFocus() {
         if (typeof window !== "undefined") {
+            // Indicate we're switching between inputs
+            isSwitchingInputs = true;
+
             currentViewportHeight = window.innerHeight;
 
             // Store the current scroll position
@@ -84,7 +89,20 @@
 
     function handleInputBlur() {
         if (typeof window !== "undefined") {
+            // Indicate we've stopped focusing this input
+            isSwitchingInputs = false;
+
+            // Don't reset viewport if auth was just completed - keep keyboard space
+            if (authCompleted) {
+                return;
+            }
+
             setTimeout(() => {
+                // Double-check auth isn't completed and we're not switching inputs
+                if (authCompleted || isSwitchingInputs) {
+                    return;
+                }
+
                 currentViewportHeight = initialViewportHeight;
 
                 // Reset viewport meta tag
@@ -113,6 +131,11 @@
     function handleViewportResize() {
         if (typeof window !== "undefined") {
             currentViewportHeight = window.innerHeight;
+
+            // Don't reset viewport if auth was completed or we're switching inputs
+            if (authCompleted || isSwitchingInputs) {
+                return;
+            }
 
             // If viewport is back to initial height, reset any viewport adjustments
             if (currentViewportHeight >= initialViewportHeight * 0.9) {
@@ -149,6 +172,7 @@
         }
 
         loginLoading = true;
+        dispatch("authStart");
 
         try {
             if (authMode === "signup") {
@@ -159,6 +183,8 @@
                 toast.success(
                     "Account created successfully! Please check your email to verify your account.",
                 );
+                // Mark auth as completed to prevent viewport reset
+                authCompleted = true;
                 // For signup, don't dispatch success immediately - wait for email verification
                 // The unified auth store will handle the state changes when email is confirmed
             } else {
@@ -166,13 +192,42 @@
                     email.trim(),
                     password.trim(),
                 );
-                toast.success("Welcome back!");
+                // Mark auth as completed to prevent viewport reset
+                authCompleted = true;
                 // For login, dispatch success immediately since they're authenticated
                 dispatch("authSuccess");
             }
         } catch (error) {
-            console.error("Auth error:", error);
-            toast.error("An unexpected error occurred. Please try again.");
+            
+            // Extract meaningful error message from Supabase
+            let errorMessage = "An unexpected error occurred. Please try again.";
+            
+            if (error instanceof Error) {
+                const message = error.message.toLowerCase();
+                
+                if (message.includes("invalid login credentials") || 
+                    message.includes("email not confirmed") ||
+                    message.includes("invalid email or password")) {
+                    errorMessage = "Email or password is incorrect";
+                } else if (message.includes("email already registered") || 
+                          message.includes("user already registered")) {
+                    errorMessage = "An account with this email already exists";
+                } else if (message.includes("password should be at least")) {
+                    errorMessage = "Password must be at least 6 characters long";
+                } else if (message.includes("invalid email")) {
+                    errorMessage = "Please enter a valid email address";
+                } else if (message.includes("signup is disabled")) {
+                    errorMessage = "Account creation is currently disabled";
+                } else if (message.includes("email rate limit")) {
+                    errorMessage = "Too many attempts. Please wait before trying again";
+                } else {
+                    // For other specific errors, show the actual message if it's user-friendly
+                    errorMessage = error.message;
+                }
+            }
+            
+            toast.error(errorMessage);
+            dispatch("authError");
         } finally {
             loginLoading = false;
         }
@@ -265,6 +320,10 @@
                     "width=device-width, initial-scale=1.0",
                 );
             }
+
+            // Reset auth state on cleanup
+            authCompleted = false;
+            isSwitchingInputs = false;
         }
     });
 </script>

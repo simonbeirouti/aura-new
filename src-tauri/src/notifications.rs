@@ -193,22 +193,42 @@ async fn get_notification_settings_internal() -> Result<NotificationSettings, St
 pub fn setup_notification_handlers(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let app_handle_1 = app.clone();
     let app_handle_2 = app.clone();
-    
+
     // Listen for notification actions
     app.listen("tauri://notification-action", move |event| {
         println!("Notification action received: {:?}", event.payload());
-        
-        // Emit to frontend
-        let _ = app_handle_1.emit("notification-action-performed", event.payload());
+
+        // Parse the payload and extract action details
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+            let action_id = payload.get("actionId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            let input = payload.get("input")
+                .and_then(|v| v.as_str());
+
+            // Create a clean payload for the frontend
+            let frontend_payload = serde_json::json!({
+                "actionId": action_id,
+                "input": input,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            });
+
+            // Emit to frontend
+            let _ = app_handle_1.emit("notification-action-performed", frontend_payload);
+        } else {
+            // Fallback if payload parsing fails
+            let _ = app_handle_1.emit("notification-action-performed", event.payload());
+        }
     });
-    
+
     // Listen for notification clicks
     app.listen("tauri://notification-click", move |event| {
         println!("Notification clicked: {:?}", event.payload());
-        
+
         // Emit to frontend
         let _ = app_handle_2.emit("notification-clicked", event.payload());
     });
-    
+
     Ok(())
 }

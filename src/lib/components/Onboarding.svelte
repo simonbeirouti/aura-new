@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from "svelte";
     import { centralizedAuth } from "../stores/unifiedAuth";
+    import { loadingActions } from "../stores/loadingStore";
     import OnboardingIntro from "./onboarding/OnboardingIntro.svelte";
     import OnboardingSecurity from "./onboarding/OnboardingSecurity.svelte";
     import OnboardingAuth from "./onboarding/OnboardingAuth.svelte";
@@ -9,67 +10,169 @@
 
     const dispatch = createEventDispatcher();
 
-    // Onboarding state - supports 4 steps (intro, security, auth, profile)
+    const totalSteps = 3;
+
+    let isAuthenticating = $state(false);
+    let onboardingComplete = $state(false);
     let currentStep = $state(1);
-    const totalSteps = 4;
     
-    // Check if user is already authenticated on mount
-    onMount(() => {
-        // If user is already authenticated but hasn't completed onboarding, go to profile step
-        if ($centralizedAuth.isAuthenticated && $centralizedAuth.user) {
-            // If they have a complete profile, the layout will handle showing the main app
-            // via the shouldShowApp derived store, so we don't need to do anything here
-            if (!$centralizedAuth.profile || !$centralizedAuth.profile.onboarding_complete) {
-                // User is authenticated but needs to complete profile setup
-                currentStep = 4;
-            }
+    const shouldShowApp = centralizedAuth.shouldShowApp;
+
+    // Sync local states with centralized auth state
+    $effect(() => {
+        const wasCompleted = onboardingComplete;
+        onboardingComplete = centralizedAuth.isOnboardingCompleted();
+
+        // If onboarding was just marked as completed, dispatch the complete event
+        if (!wasCompleted && onboardingComplete) {
+            dispatch('complete');
+        }
+    });
+
+    $effect(() => {
+        const centralizedStep = centralizedAuth.getCurrentOnboardingStep();
+        if (centralizedStep !== currentStep) {
+            currentStep = centralizedStep;
         }
     });
     
-    // Navigation functions
+    onMount(() => {
+        // The reactive effect above will sync with the centralized auth state
+        // and dispatch 'complete' if onboarding was previously completed
+    });
+    
+    let wasAuthenticated = $state(false);
+
+    $effect(() => {
+        const isAuth = $centralizedAuth.isAuthenticated;
+        const hasUser = !!$centralizedAuth.user;
+
+        if (isAuth && hasUser) {
+            wasAuthenticated = true;
+        }
+
+        if (!isAuth && !hasUser && wasAuthenticated && currentStep === 4) {
+            centralizedAuth.resetOnboardingState();
+            wasAuthenticated = false;
+        }
+        });
+    
+    const isWaitingForProfile = $derived(
+        $centralizedAuth.isAuthenticated && 
+        $centralizedAuth.user && 
+        !$centralizedAuth.profileLoaded
+    );
+    
+    $effect(() => {
+        if (isWaitingForProfile) {
+            loadingActions.showProfile();
+        } else {
+            loadingActions.hideProfile();
+        }
+    });
+    
     function nextStep() {
         if (currentStep < totalSteps) {
-            currentStep++;
+            const newStep = currentStep + 1;
+            centralizedAuth.setCurrentOnboardingStep(newStep);
+            // Force local update for immediate UI response
+            currentStep = newStep;
         }
     }
 
     function prevStep() {
         if (currentStep > 1) {
-            currentStep--;
+            const newStep = currentStep - 1;
+            centralizedAuth.setCurrentOnboardingStep(newStep);
+            // Force local update for immediate UI response
+            currentStep = newStep;
         }
     }
 
-    // Handle authentication success from OnboardingAuth component
     async function handleAuthSuccess() {
-        // Wait a moment for the auth store to update with profile data
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Check if user has completed onboarding
-        if ($centralizedAuth.profile && $centralizedAuth.profile.onboarding_complete) {
-            // User has completed onboarding, dispatch completion
-            dispatch('complete');
-        } else {
-            // User needs to complete profile setup
-            currentStep = 4;
+        isAuthenticating = false;
+
+        // Show loading while we check profile status
+        loadingActions.showApp();
+
+        try {
+            // Add a small delay to ensure loading is visible
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // Wait for profile to load if not already loaded
+            if (!$centralizedAuth.profileLoaded) {
+                let attempts = 0;
+                const maxAttempts = 30; // Max 15 seconds (500ms * 30)
+
+                while (!$centralizedAuth.profileLoaded && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    attempts++;
+                }
+
+                // If still not loaded after timeout, try to refresh
+                if (!$centralizedAuth.profileLoaded) {
+                    try {
+                        await centralizedAuth.refreshProfile();
+                        // Wait a bit more for the refresh to complete
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    } catch (error) {
+                        // Continue anyway
+                    }
+                }
+            }
+
+            // Now check onboarding status and decide what to do
+            if ($centralizedAuth.profileLoaded && $centralizedAuth.profile && $centralizedAuth.profile.onboarding_complete) {
+                // Onboarding already complete - mark as complete and go directly to main app
+                centralizedAuth.markOnboardingCompleted();
+                dispatch('complete');
+            } else if ($centralizedAuth.profileLoaded) {
+                // Profile is loaded but onboarding not complete - set step to profile setup
+                centralizedAuth.setCurrentOnboardingStep(4);
+            } else {
+                // Profile still not loaded - keep current step (don't show profile setup yet)
+                // The loading will continue until profile loads
+            }
+
+            // Force a minimum delay to prevent any microsecond flash
+            await new Promise(resolve => setTimeout(resolve, 500));
+        } finally {
+            // Hide loading after decision is made and minimum delay
+            loadingActions.hideApp();
         }
     }
+    
+    function handleAuthStart() {
+        isAuthenticating = true;
+    }
+    
+    function handleAuthError() {
+        isAuthenticating = false;
+    }
 
-    // Handle profile setup completion
     function handleProfileComplete() {
-        // Profile setup complete, dispatch completion event
+        centralizedAuth.markOnboardingCompleted();
         dispatch('complete');
     }
 </script>
 
-{#if currentStep === 3}
+<!-- Onboarding content - layout controls when this component is rendered -->
+{#if onboardingComplete}
+  <!-- Onboarding already complete - don't show anything -->
+{:else if isWaitingForProfile}
+    <!-- Let GlobalLoading handle this state -->
+  {:else if currentStep === 3}
     <!-- Authentication Step (Step 3) -->
-    <OnboardingAuth on:authSuccess={handleAuthSuccess} />
-{:else if currentStep === 4}
-    <!-- Profile Setup Step (Step 4) -->
+    <OnboardingAuth 
+        on:authSuccess={handleAuthSuccess}
+        on:authStart={handleAuthStart}
+        on:authError={handleAuthError}
+    />
+  {:else if currentStep === 4 && $centralizedAuth.profileLoaded && $centralizedAuth.profile && !$centralizedAuth.profile.onboarding_complete}
+    <!-- Profile Setup Step (Step 4) - Only show if profile is loaded, exists, and onboarding not yet complete -->
     <OnboardingProfile on:complete={handleProfileComplete} />
-{:else}
+  {:else}
     <!-- Regular Onboarding Layout for Steps 1 & 2 -->
-    <div class="min-h-screen bg-background flex flex-col relative">
+    <div class="min-h-screen flex flex-col relative">
         <!-- Main Content Container -->
         <div class="flex-1 flex flex-col justify-between items-center px-8 py-16">
             <!-- Top Section: Image and Text -->
@@ -81,10 +184,10 @@
                 {/if}
             </div>
 
-            <!-- Bottom Section: Indicator and Buttons (only for steps 1-2) -->
-            {#if currentStep < 3}
+            <!-- Bottom Section: Indicator and Buttons (only for steps 1-2, step 3 handles its own navigation) -->
+            {#if currentStep <= 2}
                 <div class="w-full mx-auto">
-                    <!-- Progress Indicator -->
+                    <!-- Progress Indicator (showing steps 1-2-3, but navigation only for 1-2) -->
                     <div class="flex justify-center gap-2 mb-16">
                         {#each Array(3) as _, i}
                             <div
@@ -115,11 +218,11 @@
                             class="w-1/2" 
                             onclick={nextStep}
                         >
-                            Next
+                            {currentStep === 2 ? "Get Started" : "Next"}
                         </Button>
                     </div>
                 </div>
             {/if}
         </div>
     </div>
-{/if}
+  {/if}
