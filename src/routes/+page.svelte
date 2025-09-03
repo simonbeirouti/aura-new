@@ -21,7 +21,8 @@
   let actionTypesInitialized = false;
 
   onMount(async () => {
-    await purchaseManager.loadProducts();
+    // Products are now loaded during auth initialization
+    // No need to load them here again
 
     // Initialize notification system
     try {

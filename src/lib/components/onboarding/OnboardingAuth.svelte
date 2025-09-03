@@ -6,6 +6,7 @@
     import { Input } from "../ui/input";
     import { Card, CardContent } from "../ui/card";
     import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
+    import { loadingStore } from "../../stores/loadingStore";
 
     const dispatch = createEventDispatcher();
 
@@ -164,6 +165,11 @@
         }
     }
 
+    function handleFormSubmit(event: Event) {
+        event.preventDefault(); // Prevent any form submission
+        handleEmailAuth();
+    }
+
     async function handleEmailAuth() {
         const validationError = validateForm();
         if (validationError) {
@@ -171,7 +177,9 @@
             return;
         }
 
+        // Show loading immediately and dispatch auth start
         loginLoading = true;
+        loadingStore.show({ id: "auth_process" });
         dispatch("authStart");
 
         try {
@@ -185,6 +193,8 @@
                 );
                 // Mark auth as completed to prevent viewport reset
                 authCompleted = true;
+                // Hide loading after successful signup
+                loadingStore.hide("auth_process");
                 // For signup, don't dispatch success immediately - wait for email verification
                 // The unified auth store will handle the state changes when email is confirmed
             } else {
@@ -194,22 +204,30 @@
                 );
                 // Mark auth as completed to prevent viewport reset
                 authCompleted = true;
-                // For login, dispatch success immediately since they're authenticated
+
+                // Wait at least 1 second for state to settle and prevent flash
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // Hide loading and dispatch success
+                loadingStore.hide("auth_process");
                 dispatch("authSuccess");
             }
-        } catch (error) {
-            
+                } catch (error) {
+
+            // Clean up loading state
+            loadingStore.hide("auth_process");
+
             // Extract meaningful error message from Supabase
             let errorMessage = "An unexpected error occurred. Please try again.";
-            
+
             if (error instanceof Error) {
                 const message = error.message.toLowerCase();
-                
-                if (message.includes("invalid login credentials") || 
+
+                if (message.includes("invalid login credentials") ||
                     message.includes("email not confirmed") ||
                     message.includes("invalid email or password")) {
                     errorMessage = "Email or password is incorrect";
-                } else if (message.includes("email already registered") || 
+                } else if (message.includes("email already registered") ||
                           message.includes("user already registered")) {
                     errorMessage = "An account with this email already exists";
                 } else if (message.includes("password should be at least")) {
@@ -225,11 +243,12 @@
                     errorMessage = error.message;
                 }
             }
-            
+
             toast.error(errorMessage);
             dispatch("authError");
         } finally {
             loginLoading = false;
+            loadingStore.hide("auth_process");
         }
     }
 
@@ -355,7 +374,7 @@
             </div>
 
             <!-- Form Container -->
-            <div class="flex justify-center">
+            <form class="flex justify-center" on:submit={handleFormSubmit}>
                 <div class="w-full max-w-sm px-2">
                     <!-- Email Input -->
                     <div class="mb-3 sm:mb-4">
@@ -428,7 +447,7 @@
 
                     <!-- Auth Button -->
                     <Button
-                        onclick={handleEmailAuth}
+                        type="submit"
                         disabled={loginLoading || !isFormValid}
                         class="w-full py-3 sm:py-4 text-sm sm:text-base font-semibold rounded-xl"
                         size="lg"
@@ -441,7 +460,7 @@
                         {/if}
                     </Button>
                 </div>
-            </div>
+            </form>
         </CardContent>
     </Card>
 

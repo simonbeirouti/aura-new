@@ -6,6 +6,7 @@ import { dataActions } from './dataStore';
 import { storeManager } from './core/storeManager';
 import { userStore } from './userStore';
 import { syncSubscriptionsWithIAP } from '$lib/utils/iapDatabase';
+import { purchaseManager } from './purchaseStore';
 
 // Supabase client setup with better error handling
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -71,6 +72,9 @@ interface UnifiedAuthState {
   profile: any | null;
   profileLoaded: boolean;
 
+  // Product data
+  productsLoaded: boolean;
+
   // Onboarding state
   onboardingCompleted: boolean;
   currentOnboardingStep: number;
@@ -87,6 +91,7 @@ interface UnifiedAuthState {
 export interface InitializationResult {
   authReady: boolean;
   profileReady: boolean;
+  productsReady: boolean;
   stripeReady: boolean;
   errors: string[];
 }
@@ -101,6 +106,7 @@ const initialState: UnifiedAuthState = {
   error: null,
   profile: null,
   profileLoaded: false,
+  productsLoaded: false,
   onboardingCompleted: false,
   currentOnboardingStep: 1,
   stripeInitialized: false,
@@ -129,21 +135,23 @@ class UnifiedAuthStore {
       // Only show app if:
       // 1. User is authenticated
       // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Profile exists and onboarding is complete
-      // 4. System is fully initialized
+      // 3. Products loading is complete (productsLoaded: true)
+      // 4. Profile exists and onboarding is complete
+      // 5. System is fully initialized
       const isAuthenticated = $state.isAuthenticated;
       const profileLoaded = $state.profileLoaded;
+      const productsLoaded = $state.productsLoaded;
       const profile = $state.profile;
       const isInitialized = $state.isInitialized;
 
-      const result = isAuthenticated && profileLoaded && profile && profile.onboarding_complete;
+      const result = isAuthenticated && profileLoaded && productsLoaded && profile && profile.onboarding_complete;
 
       // Don't show app until everything is fully initialized
       if (!isInitialized) {
         return false;
       }
 
-      // Only show app if authenticated, profile loaded, and onboarding complete
+      // Only show app if authenticated, profile loaded, products loaded, and onboarding complete
       return result;
     }
   );
@@ -154,26 +162,28 @@ class UnifiedAuthStore {
       // Only show onboarding if:
       // 1. User is authenticated
       // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Profile either doesn't exist or onboarding is not complete
-      // 4. We have waited long enough to ensure stable state (prevent flash)
+      // 3. Products loading is complete (productsLoaded: true)
+      // 4. Profile either doesn't exist or onboarding is not complete
+      // 5. We have waited long enough to ensure stable state (prevent flash)
       const isAuthenticated = $state.isAuthenticated;
       const profileLoaded = $state.profileLoaded;
+      const productsLoaded = $state.productsLoaded;
       const profile = $state.profile;
       const isInitialized = $state.isInitialized;
 
-      const result = isAuthenticated && profileLoaded && (!profile || !profile.onboarding_complete);
+      const result = isAuthenticated && profileLoaded && productsLoaded && (!profile || !profile.onboarding_complete);
 
       // Don't show onboarding until everything is fully initialized
       if (!isInitialized) {
         return false;
       }
 
-      // If profile is still loading, don't show onboarding yet to prevent flash
-      if (isAuthenticated && !profileLoaded) {
+      // If profile or products are still loading, don't show onboarding yet to prevent flash
+      if (isAuthenticated && (!profileLoaded || !productsLoaded)) {
         return false;
       }
 
-      // Only show onboarding if authenticated, profile loaded, and onboarding not complete
+      // Only show onboarding if authenticated, profile loaded, products loaded, and onboarding not complete
       return result;
     }
   );
@@ -196,6 +206,7 @@ class UnifiedAuthStore {
     const result: InitializationResult = {
       authReady: false,
       profileReady: false,
+      productsReady: false,
       stripeReady: false,
       errors: []
     };
@@ -208,12 +219,15 @@ class UnifiedAuthStore {
       const authSuccess = await this.initializeAuth();
       result.authReady = authSuccess;
 
-      // Step 4: Load profile if authenticated
-      const state = get(this.store);
-      if (state.isAuthenticated && state.user) {
+      // Step 4: Load profile and products if authenticated
+      const stateAfterAuth = get(this.store);
+      if (stateAfterAuth.isAuthenticated && stateAfterAuth.user) {
         try {
+          // Initialize data actions first
           await dataActions.initialize();
-          const profile = await dataActions.getUserProfile(state.user.id, false);
+
+          // Load profile
+          const profile = await dataActions.getUserProfile(stateAfterAuth.user.id, false);
 
           this.store.update(s => ({
             ...s,
@@ -222,12 +236,36 @@ class UnifiedAuthStore {
             onboardingCompleted: profile?.onboarding_complete || false
           }));
           result.profileReady = !!profile;
+
+          // Step 5: Load products immediately after profile is loaded
+          try {
+            // Load products silently during initialization (no toast on error)
+            await purchaseManager.loadProducts(false, false);
+            this.store.update(s => ({ ...s, productsLoaded: true }));
+            result.productsReady = true;
+          } catch (productError) {
+            result.errors.push(`Failed to load products: ${productError}`);
+            // Mark as loaded even on failure to prevent blocking the app
+            this.store.update(s => ({ ...s, productsLoaded: true }));
+          }
+
         } catch (error) {
           result.errors.push(`Failed to load profile: ${error}`);
-          this.store.update(s => ({ ...s, profileLoaded: true })); // Mark as loaded even if failed
+          this.store.update(s => ({
+            ...s,
+            profileLoaded: true,
+            productsLoaded: true // Mark products as loaded too to prevent blocking
+          }));
         }
       } else {
-        this.store.update(s => ({ ...s, profileLoaded: true })); // No user, so profile is "loaded"
+        // No user, mark both profile and products as "loaded" to prevent blocking
+        this.store.update(s => ({
+          ...s,
+          profileLoaded: true,
+          productsLoaded: true
+        }));
+        result.profileReady = true;
+        result.productsReady = true;
       }
 
       // Step 5: Wait a moment for all async operations to complete
@@ -349,11 +387,26 @@ class UnifiedAuthStore {
       if (state.profile && state.profile.onboarding_complete) {
         this.store.update(s => ({ ...s, onboardingCompleted: true }));
       }
+
+      // Load products after profile is loaded
+      try {
+        await purchaseManager.loadProducts(false, false); // Silent loading
+        this.store.update(s => ({ ...s, productsLoaded: true }));
+      } catch (productError) {
+        // Mark as loaded even on failure to prevent blocking
+        this.store.update(s => ({ ...s, productsLoaded: true }));
+        console.warn('Failed to load products during authentication:', productError);
+      }
+
     } catch (error) {
       // Don't fail authentication if profile loading fails
       // This is expected for new users who haven't created a profile yet
-      // But we still need to mark profile as loaded to prevent inconsistent state
-      this.store.update(s => ({ ...s, profileLoaded: true }));
+      // But we still need to mark profile and products as loaded to prevent inconsistent state
+      this.store.update(s => ({
+        ...s,
+        profileLoaded: true,
+        productsLoaded: true
+      }));
     }
 
     // Start background IAP sync after authentication
@@ -394,6 +447,7 @@ class UnifiedAuthStore {
       profileLoaded: false,
       onboardingCompleted: false,
       currentOnboardingStep: 1,
+      productsLoaded: false,
       lastActivity: null,
       tokenExpiresAt: null
     }));
@@ -427,7 +481,7 @@ class UnifiedAuthStore {
    * Handle user sign up with email and password
    */
   async handleSignUp(email: string, password: string): Promise<void> {
-    // loadingActions.showAuth('Creating your account...');
+    // loadingActions.showAuth();
     this.store.update(state => ({ ...state, isLoading: true, error: null }));
 
     try {
@@ -466,7 +520,7 @@ class UnifiedAuthStore {
    * Handle user login with email and password
    */
   async handleLogin(email: string, password: string): Promise<void> {
-    // loadingActions.showAuth('Signing you in...');
+    // loadingActions.showAuth();
     this.store.update(state => ({ ...state, isLoading: true, error: null }));
 
     try {
