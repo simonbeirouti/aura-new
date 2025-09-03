@@ -6,12 +6,7 @@
     import { Input } from "../ui/input";
     import { Card, CardContent } from "../ui/card";
     import { Tabs, TabsList, TabsTrigger } from "../ui/tabs";
-    import { Badge } from "../ui/badge";
     import { loadingStore } from "../../stores/loadingStore";
-    import { dataStore } from "../../stores/dataStore";
-
-    // Import derived stores from unifiedAuth
-    import { shouldShowApp, shouldShowOnboarding, shouldShowLogin } from "../../stores/unifiedAuth";
 
     const dispatch = createEventDispatcher();
 
@@ -540,97 +535,5 @@
                 />
             </svg>
         </Button>
-    </div>
-
-    <!-- Debug Information Panel -->
-    <div class="mt-6 p-4 bg-muted/50 border rounded-lg mx-3">
-      <h3 class="text-sm font-semibold mb-3 text-muted-foreground">🔧 Auth Debug Info</h3>
-      <div class="grid grid-cols-2 gap-3 text-xs">
-        <!-- Auth Status -->
-        <div class="space-y-1">
-          <div class="font-medium">Auth</div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.isAuthenticated ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-          }`}>
-            {$centralizedAuth.isAuthenticated ? '✅' : '❌'} Auth
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.isInitialized ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-          }`}>
-            {$centralizedAuth.isInitialized ? '✅' : '⏳'} Init
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.isLoading ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'
-          }`}>
-            {$centralizedAuth.isLoading ? '⏳' : '✅'} Loading
-          </div>
-        </div>
-
-        <!-- Profile Status -->
-        <div class="space-y-1">
-          <div class="font-medium">Profile</div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.profileLoaded ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
-          }`}>
-            {$centralizedAuth.profileLoaded ? '✅' : '⏳'} Loaded
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.profile ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-          }`}>
-            {!!$centralizedAuth.profile ? '✅' : '❌'} Has Profile
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $centralizedAuth.profile?.onboarding_complete ? 'bg-green-100 text-green-800' : 'bg-orange-100 text-orange-800'
-          }`}>
-            {$centralizedAuth.profile?.onboarding_complete ? '✅' : '❌'} Onboard
-          </div>
-        </div>
-
-        <!-- Data Store Status -->
-        <div class="space-y-1">
-          <div class="font-medium">Data Store</div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $dataStore.isInitialized ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-          }`}>
-            {$dataStore.isInitialized ? '✅' : '❌'} Init
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $dataStore.isLoading ? 'bg-yellow-100 text-yellow-800' : 'bg-green-100 text-green-800'
-          }`}>
-            {$dataStore.isLoading ? '⏳' : '✅'} Loading
-          </div>
-          <div class="px-2 py-1 rounded text-xs bg-blue-100 text-blue-800">
-            {$centralizedAuth.user?.id ? $centralizedAuth.user.id.substring(0, 8) + '...' : 'No ID'}
-          </div>
-        </div>
-
-        <!-- App Access Status -->
-        <div class="space-y-1">
-          <div class="font-medium">App Access</div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $shouldShowApp ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-          }`}>
-            {$shouldShowApp ? '✅' : '❌'} Show App
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $shouldShowOnboarding ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'
-          }`}>
-            {$shouldShowOnboarding ? '⏳' : '✅'} Onboarding
-          </div>
-          <div class={`px-2 py-1 rounded text-xs ${
-            $shouldShowLogin ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
-          }`}>
-            {$shouldShowLogin ? '⏳' : '✅'} Login
-          </div>
-        </div>
-      </div>
-
-      <!-- Recent Errors -->
-      {#if $dataStore.error}
-        <div class="mt-3 p-2 bg-red-50 border border-red-200 rounded text-xs">
-          <div class="font-medium text-red-800 mb-1">Recent Error:</div>
-          <div class="text-red-700">{$dataStore.error}</div>
-        </div>
-      {/if}
     </div>
 </div>

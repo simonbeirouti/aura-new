@@ -110,7 +110,7 @@ function createIAPStore() {
     lastInitialized: null,
     lastProductsQuery: null,
     lastPurchasesRestore: null,
-    cacheValidDuration: 5 * 60 * 1000 // 5 minutes
+    cacheValidDuration: 2 * 60 * 1000 // 2 minutes
   });
 
   const { subscribe, update } = store;
@@ -149,15 +149,18 @@ function createIAPStore() {
   async function initializeIAP(forceRefresh = false): Promise<boolean> {
     const currentState = get(store);
     const now = Date.now();
-    
+
     // Check if already initialized and cache is valid
-    if (!forceRefresh && 
-        currentState.isInitialized && 
-        currentState.lastInitialized && 
+    if (!forceRefresh &&
+        currentState.isInitialized &&
+        currentState.lastInitialized &&
         (now - currentState.lastInitialized) < currentState.cacheValidDuration) {
+      console.log('✅ IAP already initialized, using cached state');
       return true;
     }
+
     try {
+      console.log('🚀 Starting IAP initialization...');
       update(state => ({
         ...state,
         isLoading: true,
@@ -166,19 +169,26 @@ function createIAPStore() {
 
       // Get platform info from Tauri backend
       let platformInfo: any = null;
+      let platformError: any = null;
       try {
         platformInfo = await invoke('get_platform_info');
+        console.log('📱 Platform info:', platformInfo);
       } catch (error) {
-        // Platform detection failed, continue
+        platformError = error;
+        console.warn('⚠️ Platform detection failed:', error);
       }
 
       const isIOS = platformInfo?.os === 'ios';
       const isAndroid = platformInfo?.os === 'android';
       const isMobile = isIOS || isAndroid;
+      const isMacOS = platformInfo?.os === 'macos';
+
+      console.log('📱 Platform detection:', { isIOS, isAndroid, isMobile, isMacOS, platformInfo });
 
       // Block only desktop macOS, allow iOS and Android
-      if (await isDesktopMacOS()) {
+      if (isMacOS) {
         const macErrorMsg = 'IAP not available on desktop macOS due to platform limitations. Use iOS or Android for in-app purchases.';
+        console.warn('🚫 Blocking IAP on macOS');
         update(state => ({
           ...state,
           isInitialized: false,
@@ -191,8 +201,18 @@ function createIAPStore() {
       }
 
       // Check if IAP functions are available
+      console.log('🔍 Checking IAP plugin availability...');
+      console.log('📦 IAP functions available:', {
+        initialize: typeof initialize === 'function',
+        getProducts: typeof getProducts === 'function',
+        purchase: typeof purchase === 'function',
+        restorePurchases: typeof restorePurchases === 'function',
+        acknowledgePurchase: typeof acknowledgePurchase === 'function'
+      });
+
       if (typeof initialize !== 'function') {
         const pluginErrorMsg = 'IAP plugin functions not available. Plugin may not be loaded or not supported on this platform.';
+        console.error('❌ IAP plugin not loaded');
         update(state => ({
           ...state,
           isInitialized: false,
@@ -204,9 +224,10 @@ function createIAPStore() {
         return false;
       }
 
-      // Proceed if we're on iOS/Android or if platform detection failed (safer)
-      if (!isMobile && platformInfo) {
+      // Be more permissive - only block if we know it's not mobile AND platform detection worked
+      if (!isMobile && platformInfo && !platformError) {
         const unsupportedMsg = `IAP not supported on ${platformInfo?.os} platform. Use iOS or Android for in-app purchases.`;
+        console.warn('⚠️ Platform not supported for IAP:', platformInfo?.os);
         update(state => ({
           ...state,
           isInitialized: false,
@@ -218,8 +239,10 @@ function createIAPStore() {
         return false;
       }
 
+      console.log('🔧 Initializing IAP plugin...');
       // Initialize IAP plugin
       const result = await initialize();
+      console.log('✅ IAP plugin initialized successfully:', result);
 
       // Mark as successfully initialized with timestamp
       update(state => ({
@@ -232,10 +255,12 @@ function createIAPStore() {
         lastInitialized: now
       }));
 
+      console.log('🎉 IAP initialization completed successfully');
       return true;
 
     } catch (error) {
       const errorMsg = `IAP initialization failed: ${error}`;
+      console.error('❌ IAP initialization failed:', error);
       update(state => ({
         ...state,
         error: errorMsg,
@@ -372,20 +397,25 @@ function createIAPStore() {
 
   async function purchaseProduct(productId: string, productType?: 'inapp' | 'subs', offerToken?: string): Promise<void> {
     try {
+      console.log('🛒 Starting purchase for product:', productId);
+
       // Check if plugin is available first
       if (!checkPluginAvailability('Purchase')) {
-        return;
+        console.error('❌ IAP plugin not available for purchase');
+        throw new Error('IAP plugin not available');
       }
 
       // Check if we're initialized
       const purchaseState = get(store);
       if (!purchaseState.isInitialized) {
-        return;
+        console.error('❌ IAP not initialized');
+        throw new Error('IAP not initialized');
       }
 
       // Block only desktop macOS
       if (await isDesktopMacOS()) {
-        return;
+        console.error('❌ Purchase blocked on macOS');
+        throw new Error('IAP not available on macOS');
       }
 
       // Auto-detect product type if not provided
@@ -400,27 +430,57 @@ function createIAPStore() {
         }
       }
 
+      console.log('📦 Purchase details:', { productId, finalProductType, offerToken });
+
       // Verify product exists before purchase
-      const verifyState = get(store);
-      const productExists = verifyState.products.some(p => p.productId === productId);
-      if (!productExists) {
-        const errorMsg = `Product ${productId} not found in loaded products. Available: ${verifyState.products.map(p => p.productId).join(', ')}`;
-        update(state => ({
-          ...state,
-          error: errorMsg
-        }));
-        return;
+      let verifyState = get(store);
+      console.log('🔍 Verifying product availability...');
+      console.log('📦 Looking for product:', productId);
+      console.log('📋 Available products:', verifyState.products.map(p => p.productId));
+      console.log('📊 Total products loaded:', verifyState.products.length);
+
+      let productExists = verifyState.products.some(p => p.productId === productId);
+
+      // If no products are loaded at all, try to load them first
+      if (!productExists && verifyState.products.length === 0) {
+        console.log('🚨 No products loaded, attempting to load consumable products...');
+        try {
+          await queryProducts(iapProductIds.consumables, "inapp");
+          console.log('✅ Products loaded, retrying verification...');
+          // Retry the product check after loading
+          verifyState = get(store);
+          productExists = verifyState.products.some(p => p.productId === productId);
+          console.log('📋 Products after loading:', verifyState.products.map(p => p.productId));
+          console.log('📊 Product exists after loading:', productExists);
+        } catch (loadError) {
+          console.error('❌ Failed to load products:', loadError);
+        }
       }
 
+      // Final check
+      if (!productExists) {
+        const availableProducts = verifyState.products.map(p => p.productId).join(', ');
+        const errorMsg = `Product ${productId} not found in loaded products. Available: ${availableProducts}`;
+        console.error('❌ Product not found:', errorMsg);
+        throw new Error(errorMsg);
+      }
+
+      console.log('✅ Product verified, proceeding with purchase...');
+
+      console.log('🚀 Calling IAP plugin purchase function...');
       // Use the IAP API to initiate purchase
       const purchaseResponse = await purchase(productId, finalProductType, offerToken);
+      console.log('📱 IAP plugin purchase response:', purchaseResponse);
 
       // Handle immediate purchase response (iOS may return completed purchase data)
       if (purchaseResponse) {
         const purchaseData = purchaseResponse as any;
+        console.log('🔄 Processing immediate purchase response:', purchaseData);
 
         // Check if this is a completed purchase response
         if (purchaseData.purchaseState !== undefined) {
+          console.log('✅ Processing completed purchase immediately');
+
           // This is a completed purchase - process it immediately
           const transaction: Transaction = {
             transactionId: purchaseData.purchaseToken || purchaseData.orderId || `${productId}_${Date.now()}`,
@@ -475,16 +535,23 @@ function createIAPStore() {
           // Acknowledge purchase if needed
           if (purchaseData.purchaseState === 0 && purchaseData.purchaseToken) {
             try {
+              console.log('🔄 Acknowledging purchase...');
               await acknowledgePurchase(purchaseData.purchaseToken);
+              console.log('✅ Purchase acknowledged');
             } catch (ackError) {
-              console.error('Acknowledgment failed:', ackError);
+              console.error('❌ Acknowledgment failed:', ackError);
             }
           }
+        } else {
+          console.log('📱 Purchase initiated but not completed yet - waiting for listener');
         }
+      } else {
+        console.log('📱 Purchase initiated without immediate response - waiting for listener');
       }
-      
+
     } catch (error) {
       const errorMsg = `Error purchasing product: ${error}`;
+      console.error('❌ Purchase error:', error);
       update(state => ({
         ...state,
         error: errorMsg
@@ -677,7 +744,10 @@ function createIAPStore() {
 
   function setupPurchaseListener(): void {
     if (typeof onPurchaseUpdated === 'function' && !purchaseListener) {
-      purchaseListener = onPurchaseUpdated((purchase: any) => {        
+      console.log('🎧 Setting up purchase listener...');
+      purchaseListener = onPurchaseUpdated(async (purchase: any) => {
+        console.log('🔥 Purchase listener triggered with purchase:', purchase);
+
         const transaction: Transaction = {
           transactionId: purchase.purchaseToken || purchase.orderId || 'unknown',
           productId: purchase.productId,
@@ -687,9 +757,51 @@ function createIAPStore() {
           error: undefined
         };
 
+        console.log('📊 Transaction created:', transaction);
+
+        // Process successful purchases (only for state 0 = purchased)
+        if (purchase.purchaseState === 0) {
+          console.log('✅ Processing successful purchase...');
+          try {
+            // Get current user ID from session store
+            const { sessionStore } = await import('$lib/stores/sessionStore');
+            let currentSession: any = null;
+
+            // Handle different session store formats
+            const unsubscribe = sessionStore.subscribe((state) => {
+              currentSession = state;
+            });
+            unsubscribe();
+
+            if (currentSession?.user?.id) {
+              const userId = currentSession.user.id;
+              const productType = iapProductIds.consumables.includes(purchase.productId) ? 'consumable' : 'subscription';
+
+              console.log('🔥 Processing purchase for user:', userId, 'product:', purchase.productId, 'type:', productType);
+
+              // Import database functions
+              const { processSuccessfulPurchase } = await import('$lib/utils/iapDatabase');
+
+              // Process the purchase through our database system
+              await processSuccessfulPurchase(userId, purchase, transaction, productType);
+
+              console.log('✅ Purchase processed successfully in database - user should see token increase');
+            } else {
+              console.error('❌ No authenticated user found for purchase processing');
+            }
+          } catch (error) {
+            console.error('❌ Failed to process purchase in database:', error);
+          }
+        } else {
+          console.log('⚠️ Purchase failed or cancelled, state:', purchase.purchaseState);
+        }
+
         update(state => {
           const newPurchases = [...state.purchases.filter(p => p.purchaseToken !== purchase.purchaseToken), purchase];
           const newTransactions = [...state.transactions.filter(t => t.transactionId !== transaction.transactionId), transaction];
+
+          console.log('📦 Updated purchases count:', newPurchases.length);
+          console.log('📊 Updated transactions count:', newTransactions.length);
 
           // Update active subscriptions if this is a subscription update
           let newActiveSubscriptions = [...state.activeSubscriptions];
@@ -705,6 +817,7 @@ function createIAPStore() {
             newActiveSubscriptions = newActiveSubscriptions.filter(sub => sub.productId !== purchase.productId);
             if (purchase.purchaseState === 0) {
               newActiveSubscriptions.push(subscriptionPurchase);
+              console.log('📅 Added active subscription:', purchase.productId);
             }
           }
 
@@ -715,7 +828,12 @@ function createIAPStore() {
             activeSubscriptions: newActiveSubscriptions
           };
         });
+
+        console.log('🎉 Purchase listener processing complete');
       });
+      console.log('✅ Purchase listener setup complete');
+    } else {
+      console.warn('⚠️ Purchase listener already exists or onPurchaseUpdated not available');
     }
   }
 

@@ -2,9 +2,10 @@ import { writable, derived, get } from 'svelte/store';
 import { createClient, type AuthSession, type User } from '@supabase/supabase-js';
 import { goto } from '$app/navigation';
 import { sessionStore } from './sessionStore';
-import { dataActions } from './dataStore';
+import { dataActions, dataStore } from './dataStore';
 import { storeManager } from './core/storeManager';
 import { userStore } from './userStore';
+import { loadingStore } from './loadingStore';
 import { syncSubscriptionsWithIAP } from '$lib/utils/iapDatabase';
 
 // Supabase client setup with better error handling
@@ -870,7 +871,6 @@ class UnifiedAuthStore {
       cacheManager.clear();
 
       // Clear any persistent store data
-      const { storeManager } = await import('./core/storeManager');
       await storeManager.saveAll();
 
       // Clear biometric store
@@ -878,8 +878,7 @@ class UnifiedAuthStore {
       biometricActions.reset();
 
       // Clear user store
-      const { userStore } = await import('./userStore');
-      userStore.reset();
+      await userStore.reset();
 
       // Clear purchase store
       const { purchaseManager } = await import('./purchaseStore');
@@ -892,7 +891,6 @@ class UnifiedAuthStore {
       iapStore.reset();
 
       // Clear data store
-      const { dataStore } = await import('./dataStore');
       dataStore.reset();
     } catch (error) {
       // Continue with logout even if some caches fail to clear
@@ -905,7 +903,6 @@ class UnifiedAuthStore {
   private async resetAllStores(): Promise<void> {
     try {
       // Reset user store
-      const { userStore } = await import('./userStore');
       userStore.reset();
 
       // Reset purchase store
@@ -917,11 +914,9 @@ class UnifiedAuthStore {
       iapStore.reset();
 
       // Reset data store
-      const { dataStore } = await import('./dataStore');
       dataStore.reset();
 
       // Reset loading store
-      const { loadingStore } = await import('./loadingStore');
       loadingStore.clear();
     } catch (error) {
       // Continue with logout even if some stores fail to reset
