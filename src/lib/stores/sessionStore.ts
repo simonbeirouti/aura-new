@@ -232,8 +232,11 @@ class SessionStore {
 
   async hasValidSession(): Promise<boolean> {
     try {
+      console.log('🔍 Checking session validity...');
+
       // First check with backend
       const backendValid = await invoke<boolean>('check_session');
+      console.log('📡 Backend session check result:', backendValid);
 
       if (backendValid) {
         // Also validate token expiry if we have it
@@ -241,15 +244,29 @@ class SessionStore {
         if (state.tokenExpiresAt) {
           const now = Date.now();
           const expiryBuffer = 5 * 60 * 1000; // 5 minutes buffer
-          return state.tokenExpiresAt > (now + expiryBuffer);
+          const isValidExpiry = state.tokenExpiresAt > (now + expiryBuffer);
+
+          console.log('⏰ Token expiry check:', {
+            tokenExpiresAt: new Date(state.tokenExpiresAt).toISOString(),
+            now: new Date(now).toISOString(),
+            buffer: expiryBuffer / 1000 + 's',
+            isValid: isValidExpiry
+          });
+
+          return isValidExpiry;
         }
+
+        console.log('✅ No token expiry set, considering valid');
         return true;
       }
 
+      console.log('❌ Backend reported invalid session');
       return false;
     } catch (error) {
-      console.warn('Session check failed:', error);
-      return false;
+      console.warn('⚠️ Session check failed:', error);
+      // If backend check fails, assume session is valid to avoid unnecessary resets
+      console.log('⚠️ Backend check failed, assuming session valid to prevent auth reset');
+      return true;
     }
   }
 

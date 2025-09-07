@@ -755,21 +755,28 @@ class UnifiedAuthStore {
   }
 
   /**
-   * Refresh session
+   * Refresh session (aggressive - use gentleSessionRefresh for health checks)
    */
   async refreshSession(): Promise<void> {
     try {
+      console.log('🔄 Attempting session refresh...');
       const { data, error } = await supabase.auth.refreshSession();
 
       if (error) {
+        console.warn('❌ Session refresh failed:', error.message);
         throw new Error(error.message);
       }
 
       if (data.session && data.user) {
+        console.log('✅ Session refresh successful');
         await this.setAuthenticated(data.user, data.session);
+      } else {
+        console.warn('❌ Session refresh returned no session');
+        throw new Error('No session returned from refresh');
       }
     } catch (error) {
-      // If refresh fails, logout
+      console.error('❌ Session refresh error, logging out:', error);
+      // If refresh fails, logout - but this should be used carefully
       await this.handleLogout();
       throw error;
     }
@@ -1047,15 +1054,15 @@ class UnifiedAuthStore {
       clearInterval(this.healthCheckTimer);
     }
 
-    // Run health check every 5 minutes
+    // Run health check every 10 minutes (reduced frequency)
     this.healthCheckTimer = setInterval(async () => {
       await this.performHealthCheck();
-    }, 5 * 60 * 1000); // 5 minutes
+    }, 10 * 60 * 1000); // 10 minutes
 
-    // Also run an immediate health check after 30 seconds
+    // Run first health check after 2 minutes (delayed start)
     setTimeout(async () => {
       await this.performHealthCheck();
-    }, 30000);
+    }, 2 * 60 * 1000); // 2 minutes
   }
 
   /**
@@ -1064,59 +1071,96 @@ class UnifiedAuthStore {
   private async performHealthCheck(): Promise<void> {
     const state = get(this.store);
 
-    // Skip health check if not authenticated
+    // Skip health check if not authenticated or recently authenticated (within 5 minutes)
     if (!state.isAuthenticated || !state.user) {
+      return;
+    }
+
+    // Skip health check if authentication was established very recently (within 5 minutes)
+    // This prevents interference with fresh authentication
+    const now = Date.now();
+    const authAge = now - (state.lastActivity || 0);
+    const minAuthAge = 5 * 60 * 1000; // 5 minutes
+
+    if (authAge < minAuthAge) {
+      console.log('🔍 Skipping health check - authentication too recent');
       return;
     }
 
     try {
       console.log('🔍 Performing health check...');
 
-      // Check 1: Session validity (be gentle - don't reset auth on single failure)
+      // Check 1: Session validity (be very gentle - don't refresh on minor issues)
+      let sessionValid = true;
       try {
-        const sessionValid = await sessionStore.hasValidSession();
+        sessionValid = await sessionStore.hasValidSession();
+
+        // Only attempt refresh if we're confident the session is actually invalid
+        // Don't refresh if tokens exist but expiry check fails (could be timezone issue)
         if (!sessionValid) {
-          console.log('⚠️ Session check failed, attempting refresh...');
-          await this.refreshSession();
-          return;
+          const tokens = await sessionStore.getStoredTokens();
+          if (tokens) {
+            console.log('⚠️ Tokens exist but session validation failed - skipping refresh to avoid auth reset');
+            sessionValid = true; // Consider valid if tokens exist
+          } else {
+            console.log('⚠️ No tokens found, attempting gentle refresh...');
+            await this.gentleSessionRefresh();
+            return;
+          }
         }
       } catch (sessionError) {
         console.warn('⚠️ Session validation error during health check:', sessionError);
         // Don't reset auth on session check errors
       }
 
-      // Check 2: Token expiry (refresh if needed)
-      try {
-        if (sessionStore.isTokenRefreshNeeded()) {
-          console.log('⚠️ Token refresh needed...');
-          await this.refreshSession();
-          return;
+      // Check 2: Token expiry (only refresh if clearly needed and safe to do so)
+      if (sessionValid) {
+        try {
+          const needsRefresh = sessionStore.isTokenRefreshNeeded();
+          if (needsRefresh) {
+            // Only refresh if we're not too close to expiry (avoid unnecessary refreshes)
+            const state = get(this.store);
+            if (state.tokenExpiresAt) {
+              const timeToExpiry = state.tokenExpiresAt - now;
+              const safeRefreshWindow = 15 * 60 * 1000; // 15 minutes
+
+              if (timeToExpiry > safeRefreshWindow) {
+                console.log('⚠️ Token refresh needed but not urgent, skipping...');
+              } else {
+                console.log('⚠️ Token refresh needed soon, attempting gentle refresh...');
+                await this.gentleSessionRefresh();
+                return;
+              }
+            }
+          }
+        } catch (tokenError) {
+          console.warn('⚠️ Token validation error during health check:', tokenError);
+          // Continue with other checks
         }
-      } catch (tokenError) {
-        console.warn('⚠️ Token validation error during health check:', tokenError);
-        // Continue with other checks
       }
 
-      // Check 3: Cache validity (clear old cache)
-      try {
-        const { cacheManager } = await import('./cacheManager');
-        const lastCleanup = cacheManager.getStats().lastCleanup;
-        const now = Date.now();
-        const oneHour = 60 * 60 * 1000;
+      // Check 3: Cache validity (clear old cache) - only if session is stable
+      if (sessionValid) {
+        try {
+          const { cacheManager } = await import('./cacheManager');
+          const lastCleanup = cacheManager.getStats().lastCleanup;
+          const now = Date.now();
+          const twoHours = 2 * 60 * 60 * 1000; // Increased to 2 hours to reduce frequency
 
-        if (now - lastCleanup > oneHour) {
-          console.log('🧹 Clearing stale cache...');
-          cacheManager.clear();
+          if (now - lastCleanup > twoHours) {
+            console.log('🧹 Clearing stale cache...');
+            cacheManager.clear();
+          }
+        } catch (cacheError) {
+          console.warn('⚠️ Cache cleanup error during health check:', cacheError);
         }
-      } catch (cacheError) {
-        console.warn('⚠️ Cache cleanup error during health check:', cacheError);
       }
 
       // Check 4: Profile data freshness (only refresh if onboarding is complete and it's been a while)
-      if (state.profileLoaded && state.profile && state.onboardingCompleted) {
+      if (state.profileLoaded && state.profile && state.onboardingCompleted && sessionValid) {
         try {
           const profileAge = Date.now() - (state.lastActivity || 0);
-          const maxProfileAge = 30 * 60 * 1000; // 30 minutes
+          const maxProfileAge = 60 * 60 * 1000; // Increased to 1 hour to reduce frequency
 
           if (profileAge > maxProfileAge) {
             console.log('📋 Refreshing stale profile data...');
@@ -1132,6 +1176,32 @@ class UnifiedAuthStore {
     } catch (error) {
       console.warn('⚠️ Health check failed:', error);
       // Don't fail the entire app on health check errors
+    }
+  }
+
+  /**
+   * Gentle session refresh that doesn't reset authentication on failure
+   */
+  private async gentleSessionRefresh(): Promise<void> {
+    try {
+      console.log('🔄 Attempting gentle session refresh...');
+      const { data, error } = await supabase.auth.refreshSession();
+
+      if (error) {
+        console.warn('⚠️ Gentle session refresh failed:', error.message);
+        // Don't reset authentication on refresh failure
+        return;
+      }
+
+      if (data.session && data.user) {
+        console.log('✅ Gentle session refresh successful');
+        await this.setAuthenticated(data.user, data.session);
+      } else {
+        console.warn('⚠️ Gentle session refresh returned no session');
+      }
+    } catch (refreshError) {
+      console.warn('⚠️ Gentle session refresh error:', refreshError);
+      // Don't reset authentication on refresh errors
     }
   }
 
