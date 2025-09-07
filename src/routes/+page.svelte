@@ -1,8 +1,8 @@
 <script lang="ts">
   import AppLayout from "$lib/components/AppLayout.svelte";
   import { onMount } from "svelte";
-  import { userStore } from "$lib/stores/userStore";
-  import { formattedAvailableTokens } from "$lib/stores/userStore";
+  import { goto } from "$app/navigation";
+  import { formattedAvailableTokens, userStore, availableTokens } from "$lib/stores/userStore";
   import {
     purchaseManager,
     products,
@@ -20,6 +20,26 @@
 
   let permissionGranted = false;
   let actionTypesInitialized = false;
+
+  // Reactive: Check if user can afford each product
+  $: canAffordProduct = (tokenCost: number) => {
+    const canAfford = $availableTokens >= tokenCost;
+    console.log(`💰 Can afford product costing ${tokenCost} tokens? ${canAfford} (available: ${$availableTokens})`);
+    return canAfford;
+  };
+
+  // Reactive: Log token balance changes and refresh when low
+  $: if ($availableTokens !== undefined) {
+    console.log(`💵 Token balance updated: ${$availableTokens} tokens available`);
+
+    // If balance is very low (≤ 5 tokens), force a refresh to ensure accuracy
+    if ($availableTokens <= 5 && $userStore.isInitialized && $userStore.userId) {
+      console.log(`⚠️ Low token balance detected (${$availableTokens}), forcing balance refresh`);
+      setTimeout(() => {
+        userStore.refreshTokenBalance(true);
+      }, 500);
+    }
+  }
 
   // Reactive: Ensure products are loaded when user becomes authenticated
   $: if ($centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized && $products.length === 0 && !$productsLoading) {
@@ -86,8 +106,19 @@
       return;
     }
 
+    // Check token balance before attempting purchase
+    const product = purchaseManager.getProduct(productId);
+    if (product && !canAffordProduct(product.token_cost)) {
+      console.log(`❌ UI check failed: Cannot afford ${productId} (cost: ${product.token_cost}, available: ${$availableTokens})`);
+      toast.error("You don't have enough tokens. Redirecting to purchase more...");
+      setTimeout(() => {
+        goto('/packages');
+      }, 1500);
+      return;
+    }
+
     try {
-      console.log(`🛒 Starting purchase flow for ${productId}`);
+      console.log(`🛒 Starting purchase flow for ${productId} (available tokens: ${$availableTokens})`);
 
       await purchaseManager.purchaseProduct(productId, userId);
 
@@ -134,6 +165,18 @@
       if (errorMessage === "Purchase already in progress") {
         console.log(`⚠️ Purchase already in progress for ${productId}`);
         return; // Don't show error toast for this
+      }
+
+      // Handle insufficient tokens error specifically
+      if (errorMessage === "INSUFFICIENT_TOKENS") {
+        console.log(`💰 Insufficient tokens detected for ${productId}, redirecting to packages`);
+        toast.error("You don't have enough tokens. Redirecting to purchase more...");
+
+        // Small delay to allow toast to show, then redirect
+        setTimeout(() => {
+          goto('/packages');
+        }, 1500);
+        return;
       }
 
       console.error(`❌ Purchase failed for ${productId}:`, errorMessage);
@@ -320,7 +363,7 @@
                 <Button
                   onclick={() => purchaseProduct(product.id)}
                   disabled={$purchaseLoading[product.id] ||
-                    !userStore.hasSufficientTokens(product.token_cost)}
+                    !canAffordProduct(product.token_cost)}
                   class="w-full"
                 >
                   {#if $purchaseLoading[product.id]}
@@ -328,7 +371,7 @@
                       class="animate-spin rounded-full h-4 w-4 border-b-2 border-current"
                     ></div>
                     <span>Purchasing...</span>
-                  {:else if !userStore.hasSufficientTokens(product.token_cost)}
+                  {:else if !canAffordProduct(product.token_cost)}
                     <span>Insufficient Tokens</span>
                   {:else}
                     <span>🪙</span>

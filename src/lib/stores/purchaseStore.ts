@@ -52,7 +52,7 @@ storeManager.registerStore('purchase', purchaseStore);
 
 // Enhanced purchase store with caching
 class PurchaseManager {
-  private store = purchaseStore;
+  public store = purchaseStore;
 
   get subscribe() {
     return this.store.subscribe;
@@ -138,11 +138,34 @@ class PurchaseManager {
       }
 
       console.log(`🔄 Initiating purchase for ${productId} by user ${userId}`);
+      console.log(`📦 Product details:`, product);
+
+      // Pre-purchase eligibility check - check against database in real-time
+      console.log(`🔍 Checking purchase eligibility before proceeding...`);
+      try {
+        const canPurchase = await invoke<boolean>('can_purchase_product', { userId, productId });
+
+        if (!canPurchase) {
+          console.log(`❌ Purchase eligibility check failed for ${productId} - insufficient tokens`);
+          throw new Error('INSUFFICIENT_TOKENS');
+        }
+
+        console.log(`✅ Purchase eligibility confirmed for ${productId}`);
+      } catch (eligibilityError) {
+        if (eligibilityError instanceof Error && eligibilityError.message === 'INSUFFICIENT_TOKENS') {
+          // Re-throw with specific error for UI handling
+          throw new Error('INSUFFICIENT_TOKENS');
+        }
+        // If eligibility check fails for other reasons, log but continue (might be network issue)
+        console.warn(`⚠️ Eligibility check failed, proceeding with purchase:`, eligibilityError);
+      }
 
       // Execute purchase through Tauri backend
+      console.log(`🚀 Calling Tauri backend purchase_product command...`);
       const purchase = await invoke('purchase_product', { productId, userId });
 
       console.log(`✅ Purchase completed for ${productId}:`, purchase);
+      console.log(`💰 Purchase result:`, JSON.stringify(purchase, null, 2));
 
       // Invalidate relevant caches
       cacheManager.handlePurchaseCompletion(userId);
@@ -161,9 +184,22 @@ class PurchaseManager {
       };
 
     } catch (err) {
+      console.error(`❌ Purchase failed for ${productId}:`, err);
+
+      // Log detailed error information
+      if (err instanceof Error) {
+        console.error(`🔍 Error details:`, {
+          name: err.name,
+          message: err.message,
+          stack: err.stack
+        });
+      } else {
+        console.error(`🔍 Non-Error object thrown:`, typeof err, err);
+      }
+
       const errorMessage = err instanceof Error ? err.message : 'Purchase failed';
 
-      console.error(`❌ Purchase failed for ${productId}:`, errorMessage);
+      console.error(`📝 Final error message: ${errorMessage}`);
 
       // Store error in state for UI feedback
       this.store.update(state => ({
@@ -171,8 +207,9 @@ class PurchaseManager {
         purchaseErrors: { ...state.purchaseErrors, [productId]: errorMessage }
       }));
 
-      // Show toast error instead of storing in state
-      toast.error(`Purchase failed: ${errorMessage}`);
+      // Show toast error with more details
+      const detailedError = err instanceof Error ? `${err.message}` : 'Unknown purchase error';
+      toast.error(`Purchase failed: ${detailedError}`);
       throw err;
     } finally {
       this.store.update(state => ({

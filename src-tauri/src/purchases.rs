@@ -108,114 +108,74 @@ pub async fn purchase_product(
     product_id: String,
     app: tauri::AppHandle
 ) -> Result<Purchase, String> {
+    println!("🛒 Tauri purchase_product called with user_id: {}, product_id: {}", user_id, product_id);
+
     let config = get_authenticated_db(&app).await?;
-    
-    // First, check if product exists and get its cost
-    let product_response = make_db_request(
-        "GET",
-        &format!("products?id=eq.{}&is_active=eq.true", product_id),
-        None,
-        &config,
-    ).await?;
-    
-    let products: Vec<Product> = serde_json::from_value(product_response)
-        .map_err(|e| format!("Failed to parse product: {}", e))?;
-    
-    let product = products.first()
-        .ok_or("Product not found or inactive")?;
-    
-    // Check user's token balance
-    let balance_response = make_db_request(
-        "GET",
-        &format!("user_tokens?user_id=eq.{}", user_id),
-        None,
-        &config,
-    ).await?;
-    
-    let balances: Vec<serde_json::Value> = serde_json::from_value(balance_response)
-        .map_err(|e| format!("Failed to parse balance: {}", e))?;
-    
-    let balance = balances.first()
-        .ok_or("User token balance not found")?;
-    
-    let total_tokens = balance["total_tokens"].as_i64().unwrap_or(0);
-    let tokens_used = balance["tokens_used"].as_i64().unwrap_or(0);
-    let available_tokens = total_tokens - tokens_used;
-    
-    if available_tokens < product.token_cost {
-        return Err(format!("Insufficient tokens. Required: {}, Available: {}", product.token_cost, available_tokens));
-    }
-    
-    let now = chrono::Utc::now();
-    let now_rfc = now.to_rfc3339();
-    
-    // Generate unique purchase ID
-    let purchase_id = format!("purchase_{}_{}_{}", user_id, product_id, now.timestamp_millis());
-    
-    // Create purchase record
+    println!("✅ Database config retrieved successfully");
+
+    // Use the new database-level make_purchase function for atomic transactions
+    // For Supabase RPC calls, we need to pass parameters in the request body
     let purchase_data = serde_json::json!({
-        "id": purchase_id,
-        "user_id": user_id,
-        "product_id": product_id,
-        "token_cost": product.token_cost,
-        "purchase_status": "completed",
-        "created_at": now_rfc,
-        "updated_at": now_rfc
+        "p_user_id": user_id,
+        "p_product_id": product_id
     });
-    
-    let _purchase_response = make_db_request(
+
+    println!("📤 Making RPC call to make_purchase with data: {:?}", purchase_data);
+    println!("🔗 RPC URL: {}/rpc/make_purchase", config.database_url);
+
+    // Call the make_purchase PostgreSQL function
+    println!("🔄 Calling make_db_request...");
+    let response = match make_db_request(
         "POST",
-        "purchases",
+        "rpc/make_purchase",
         Some(purchase_data),
         &config,
-    ).await?;
-    
-    // Purchase created successfully - use the ID we generated
-    // No need to extract from response since we provided the ID
-    
-    // Update user token balance
-    let new_tokens_used = tokens_used + product.token_cost;
-    let balance_update = serde_json::json!({
-        "tokens_used": new_tokens_used
-    });
-    
-    make_db_request(
-        "PATCH",
-        &format!("user_tokens?user_id=eq.{}", user_id),
-        Some(balance_update),
+    ).await {
+        Ok(resp) => {
+            println!("✅ make_db_request succeeded");
+            resp
+        },
+        Err(e) => {
+            println!("❌ make_db_request failed: {}", e);
+            return Err(format!("Database request failed: {}", e));
+        }
+    };
+
+    println!("📥 RPC response received: {:?}", response);
+
+    // Check if the purchase was successful
+    let success = response["success"].as_bool().unwrap_or(false);
+    if !success {
+        let error_msg = response["error"]
+            .as_str()
+            .unwrap_or("Purchase failed - unknown error");
+        println!("Purchase failed with error: {}", error_msg);
+        return Err(error_msg.to_string());
+    }
+
+    // Extract purchase details from the response
+    let purchase_id = response["purchase_id"]
+        .as_str()
+        .ok_or("Purchase ID not found in response")?
+        .to_string();
+
+    println!("Purchase successful, ID: {}", purchase_id);
+
+    // Get the purchase details from the database to return complete information
+    let purchase_response = make_db_request(
+        "GET",
+        &format!("purchases?id=eq.{}", purchase_id),
+        None,
         &config,
     ).await?;
-    
-    // Create token transaction record
-    let transaction_data = serde_json::json!({
-        "user_id": user_id,
-        "token_amount": -product.token_cost, // Negative for usage
-        "transaction_type": "usage",
-        "description": format!("Purchase: {}", product.name),
-        "product_id": product_id,
-        "created_at": now_rfc.clone(),
-        "updated_at": now_rfc,
-    });
-    
-    make_db_request(
-        "POST",
-        "token_transactions",
-        Some(transaction_data),
-        &config,
-    ).await?;
-    
-    // Return the purchase
-    Ok(Purchase {
-        id: purchase_id,
-        user_id,
-        product_id,
-        token_cost: product.token_cost,
-        purchase_status: "completed".to_string(),
-        transaction_id: None,
-        metadata: None,
-        created_at: now_rfc.clone(),
-        updated_at: now_rfc,
-    })
+
+    let purchases: Vec<Purchase> = serde_json::from_value(purchase_response)
+        .map_err(|e| format!("Failed to retrieve purchase details: {}", e))?;
+
+    let purchase = purchases.first()
+        .ok_or("Purchase not found after creation")?;
+
+    Ok(purchase.clone())
 }
 
 #[tauri::command]
@@ -238,6 +198,14 @@ pub async fn get_user_purchases(
     Ok(purchases)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PurchaseEligibility {
+    pub can_purchase: bool,
+    pub tokens_available: i64,
+    pub token_cost: i64,
+    pub tokens_needed: i64,
+}
+
 #[tauri::command]
 pub async fn can_purchase_product(
     user_id: String,
@@ -245,42 +213,49 @@ pub async fn can_purchase_product(
     app: tauri::AppHandle
 ) -> Result<bool, String> {
     let config = get_authenticated_db(&app).await?;
-    
-    // Get product cost
-    let product_response = make_db_request(
+
+    // Use the new database-level user_purchase_eligibility view
+    println!("Checking purchase eligibility for user: {}, product: {}", user_id, product_id);
+
+    let eligibility_response = make_db_request(
         "GET",
-        &format!("products?id=eq.{}&is_active=eq.true", product_id),
+        &format!("user_purchase_eligibility?user_id=eq.{}&product_id=eq.{}", user_id, product_id),
         None,
         &config,
     ).await?;
-    
-    let products: Vec<Product> = serde_json::from_value(product_response)
-        .map_err(|e| format!("Failed to parse product: {}", e))?;
-    
-    let product = match products.first() {
-        Some(p) => p,
-        None => return Ok(false), // Product doesn't exist or inactive
-    };
-    
-    // Get user balance
-    let balance_response = make_db_request(
-        "GET",
-        &format!("user_tokens?user_id=eq.{}", user_id),
-        None,
-        &config,
-    ).await?;
-    
-    let balances: Vec<serde_json::Value> = serde_json::from_value(balance_response)
-        .map_err(|e| format!("Failed to parse balance: {}", e))?;
-    
-    let balance = match balances.first() {
-        Some(b) => b,
-        None => return Ok(false), // User balance doesn't exist
-    };
-    
-    let total_tokens = balance["total_tokens"].as_i64().unwrap_or(0);
-    let tokens_used = balance["tokens_used"].as_i64().unwrap_or(0);
-    let available_tokens = total_tokens - tokens_used;
-    
-    Ok(available_tokens >= product.token_cost)
+
+    println!("Eligibility response: {:?}", eligibility_response);
+
+    let eligibility: Vec<serde_json::Value> = serde_json::from_value(eligibility_response)
+        .map_err(|e| format!("Failed to check purchase eligibility: {}", e))?;
+
+    // Check if we have any results
+    if eligibility.is_empty() {
+        return Err("Product not found or not available".to_string());
+    }
+
+    // Get the first (and should be only) result
+    let item = &eligibility[0];
+
+    let can_purchase = item.get("can_purchase")
+        .and_then(|v| v.as_i64())
+        .map(|v| v == 1)
+        .unwrap_or(false);
+
+    let tokens_available = item.get("tokens_available")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let token_cost = item.get("token_cost")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    println!("Can purchase result: {}, tokens_available: {}, token_cost: {}", can_purchase, tokens_available, token_cost);
+
+    // If cannot purchase due to insufficient tokens, return a specific error
+    if !can_purchase && tokens_available < token_cost {
+        return Err("INSUFFICIENT_TOKENS".to_string());
+    }
+
+    Ok(can_purchase)
 }

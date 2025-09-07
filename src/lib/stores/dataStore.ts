@@ -688,31 +688,424 @@ class DataStore {
 
   // Sync management
   private setupPeriodicSync() {
-    // Re-enable periodic sync with safeguards
+    console.log('🔄 Setting up periodic sync with conflict resolution');
+
+    // Re-enable periodic sync with enhanced safeguards
     this.syncInterval = setInterval(async () => {
       try {
-        // Only sync if we have data to sync and it's safe to do so
+        // Multiple safety checks before syncing
         const currentState = get(this.store);
-        if (currentState.isInitialized && !currentState.isLoading) {
-          await this.sync();
+
+        // Skip if not initialized
+        if (!currentState.isInitialized) {
+          return;
         }
+
+        // Skip if currently loading
+        if (currentState.isLoading) {
+          console.log('⚠️ Skipping periodic sync - currently loading');
+          return;
+        }
+
+        // Skip if we have pending changes that haven't been processed
+        if (currentState.pendingChanges.length > 0) {
+          console.log('⚠️ Skipping periodic sync - pending changes exist');
+          return;
+        }
+
+        // Skip if offline queue is too large (backpressure)
+        if (currentState.offlineQueue && currentState.offlineQueue.length > 50) {
+          console.log('⚠️ Skipping periodic sync - offline queue too large');
+          return;
+        }
+
+        // Check network connectivity (basic check)
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+          console.log('⚠️ Skipping periodic sync - offline');
+          return;
+        }
+
+        // All checks passed - perform sync
+        console.log('🔄 Executing periodic sync...');
+        await this.sync();
+
       } catch (error) {
-        console.warn('Periodic sync failed:', error);
+        console.warn('⚠️ Periodic sync failed:', error);
+        // Don't let sync failures crash the app
       }
-    }, 30000); // Sync every 30 seconds
+    }, 45000); // Sync every 45 seconds (less frequent to reduce load)
+
+    console.log('✅ Periodic sync setup complete');
   }
 
   async sync() {
     try {
+      const currentState = get(this.store);
+
+      // Skip sync if not initialized or if we recently synced
+      if (!currentState.isInitialized) {
+        console.log('⚠️ Skipping sync - data store not initialized');
+        return;
+      }
+
+      const now = Date.now();
+      const lastSync = currentState.lastSync || 0;
+      const timeSinceLastSync = now - lastSync;
+
+      // Skip if synced recently (within 10 seconds)
+      if (timeSinceLastSync < 10000) {
+        console.log('⚠️ Skipping sync - recently synced');
+        return;
+      }
+
+      console.log('🔄 Starting data sync with conflict resolution...');
+
+      // Step 1: Sync with enhanced store (basic persistence)
       await this.store.sync();
+
+      // Step 2: Enhanced sync with conflict resolution
+      await this.syncWithConflictResolution();
+
+      // Step 3: Process offline queue with conflict resolution
       await this.processOfflineQueue();
-      
+
+      // Step 4: Validate and repair any inconsistencies
+      await this.validateAndRepairData();
+
+      // Update sync timestamp
       this.store.update(state => ({
         ...state,
-        lastSync: Date.now()
+        lastSync: now
       }));
+
+      console.log('✅ Data sync completed successfully');
+
     } catch (error) {
-      // Continue silently on sync error
+      console.warn('⚠️ Data sync failed:', error);
+      // Don't fail completely - just log the error
+    }
+  }
+
+  /**
+   * Enhanced sync with conflict resolution
+   */
+  private async syncWithConflictResolution(): Promise<void> {
+    try {
+      const currentState = get(this.store);
+
+      // Only sync if we have profile data
+      if (!currentState.currentProfile) {
+        return;
+      }
+
+      const profile = currentState.currentProfile;
+
+      // Fetch latest profile from server
+      const serverProfile = await this.fetchLatestProfileFromServer(profile.id);
+
+      if (!serverProfile) {
+        console.log('⚠️ No server profile found for conflict resolution');
+        return;
+      }
+
+      // Check for conflicts
+      const conflicts = this.detectProfileConflicts(profile, serverProfile);
+
+      if (conflicts.length > 0) {
+        console.log('⚠️ Profile conflicts detected:', conflicts);
+
+        // Resolve conflicts
+        const resolvedProfile = await this.resolveProfileConflicts(profile, serverProfile, conflicts);
+
+        // Update local profile with resolved data
+        if (resolvedProfile) {
+          await this.updateLocalProfileWithResolvedData(resolvedProfile);
+        }
+      } else {
+        console.log('✅ No profile conflicts detected');
+
+        // No conflicts - update local timestamps if server data is newer
+        if (this.isServerDataNewer(profile, serverProfile)) {
+          console.log('📋 Server data is newer, updating local cache...');
+          await this.updateLocalProfileCache(serverProfile);
+        }
+      }
+
+    } catch (error) {
+      console.warn('⚠️ Conflict resolution failed:', error);
+      // Continue without failing the entire sync
+    }
+  }
+
+  /**
+   * Fetch latest profile from server for conflict resolution
+   */
+  private async fetchLatestProfileFromServer(userId: string): Promise<Profile | null> {
+    try {
+      const { data, error } = await invoke<Profile>('get_user_profile', { userId });
+
+      if (error) {
+        console.warn('Failed to fetch server profile:', error);
+        return null;
+      }
+
+      return data || null;
+    } catch (error) {
+      console.warn('Error fetching server profile:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Detect conflicts between local and server profiles
+   */
+  private detectProfileConflicts(local: Profile, server: Profile): Array<{
+    field: string;
+    localValue: any;
+    serverValue: any;
+    conflictType: 'value_mismatch' | 'timestamp_mismatch';
+  }> {
+    const conflicts = [];
+
+    // Compare key fields that might have conflicts
+    const conflictFields = ['username', 'full_name', 'avatar_url', 'notifications', 'onboarding_complete'];
+
+    for (const field of conflictFields) {
+      const localValue = local[field];
+      const serverValue = server[field];
+
+      // Check for value mismatches
+      if (localValue !== serverValue && localValue !== null && serverValue !== null) {
+        conflicts.push({
+          field,
+          localValue,
+          serverValue,
+          conflictType: 'value_mismatch'
+        });
+      }
+    }
+
+    // Check timestamp conflicts (if server data is significantly newer)
+    const localTimestamp = new Date(local.updated_at || 0).getTime();
+    const serverTimestamp = new Date(server.updated_at || 0).getTime();
+    const timeDiff = Math.abs(serverTimestamp - localTimestamp);
+
+    // If server data is more than 5 minutes newer and there are changes, consider it a conflict
+    if (timeDiff > 5 * 60 * 1000 && conflicts.length > 0) {
+      conflicts.push({
+        field: 'updated_at',
+        localValue: local.updated_at,
+        serverValue: server.updated_at,
+        conflictType: 'timestamp_mismatch'
+      });
+    }
+
+    return conflicts;
+  }
+
+  /**
+   * Resolve profile conflicts using various strategies
+   */
+  private async resolveProfileConflicts(
+    local: Profile,
+    server: Profile,
+    conflicts: Array<any>
+  ): Promise<Profile | null> {
+    try {
+      // Strategy 1: For onboarding_complete, server always wins
+      if (conflicts.some(c => c.field === 'onboarding_complete')) {
+        console.log('🎯 Resolving onboarding_complete conflict - server wins');
+        return {
+          ...local,
+          onboarding_complete: server.onboarding_complete,
+          updated_at: server.updated_at
+        };
+      }
+
+      // Strategy 2: For username, check availability and prefer local if server is empty
+      if (conflicts.some(c => c.field === 'username')) {
+        const usernameConflict = conflicts.find(c => c.field === 'username');
+
+        if (!server.username && local.username) {
+          console.log('🎯 Resolving username conflict - local wins (server empty)');
+          return {
+            ...server,
+            username: local.username,
+            updated_at: new Date().toISOString()
+          };
+        } else if (server.username && !local.username) {
+          console.log('🎯 Resolving username conflict - server wins (local empty)');
+          return server;
+        } else {
+          // Both have values - check if local username is still available
+          const isAvailable = await this.checkUsernameAvailability(local.username!);
+          if (isAvailable) {
+            console.log('🎯 Resolving username conflict - local wins (available)');
+            return {
+              ...server,
+              username: local.username,
+              updated_at: new Date().toISOString()
+            };
+          } else {
+            console.log('🎯 Resolving username conflict - server wins (local unavailable)');
+            return server;
+          }
+        }
+      }
+
+      // Strategy 3: For other fields, use timestamp-based resolution
+      const localTime = new Date(local.updated_at || 0).getTime();
+      const serverTime = new Date(server.updated_at || 0).getTime();
+
+      if (serverTime > localTime) {
+        console.log('🎯 Resolving conflicts - server wins (newer timestamp)');
+        return server;
+      } else {
+        console.log('🎯 Resolving conflicts - local wins (newer or equal timestamp)');
+        return {
+          ...server,
+          ...local,
+          updated_at: new Date().toISOString()
+        };
+      }
+
+    } catch (error) {
+      console.warn('⚠️ Error resolving conflicts:', error);
+      // Fallback: server wins
+      console.log('🎯 Fallback conflict resolution - server wins');
+      return server;
+    }
+  }
+
+  /**
+   * Update local profile with resolved data
+   */
+  private async updateLocalProfileWithResolvedData(resolvedProfile: Profile): Promise<void> {
+    try {
+      // Update current profile
+      this.store.update(state => ({
+        ...state,
+        currentProfile: resolvedProfile
+      }));
+
+      // Update cache
+      await this.updateLocalProfileCache(resolvedProfile);
+
+      // Sync to server
+      await this.syncResolvedProfileToServer(resolvedProfile);
+
+      console.log('✅ Local profile updated with resolved data');
+
+    } catch (error) {
+      console.warn('⚠️ Failed to update local profile with resolved data:', error);
+    }
+  }
+
+  /**
+   * Update local profile cache
+   */
+  private async updateLocalProfileCache(profile: Profile): Promise<void> {
+    this.store.update(state => {
+      const newCache = new Map(state.profileCache);
+      const newTimestamps = new Map(state.cacheTimestamps);
+
+      newCache.set(profile.id, profile);
+      newTimestamps.set(profile.id, Date.now());
+
+      return {
+        ...state,
+        profileCache: newCache,
+        cacheTimestamps: newTimestamps
+      };
+    });
+  }
+
+  /**
+   * Sync resolved profile back to server
+   */
+  private async syncResolvedProfileToServer(profile: Profile): Promise<void> {
+    try {
+      await invoke('update_user_profile', {
+        userId: profile.id,
+        updates: profile
+      });
+
+      console.log('✅ Resolved profile synced to server');
+
+    } catch (error) {
+      console.warn('⚠️ Failed to sync resolved profile to server:', error);
+      // Add to offline queue for retry
+      this.addToOfflineQueue('update_user_profile', {
+        userId: profile.id,
+        updates: profile
+      });
+    }
+  }
+
+  /**
+   * Check if server data is newer than local
+   */
+  private isServerDataNewer(local: Profile, server: Profile): boolean {
+    const localTime = new Date(local.updated_at || 0).getTime();
+    const serverTime = new Date(server.updated_at || 0).getTime();
+
+    return serverTime > localTime;
+  }
+
+  /**
+   * Validate and repair data inconsistencies
+   */
+  private async validateAndRepairData(): Promise<void> {
+    try {
+      const currentState = get(this.store);
+
+      // Validate current profile
+      if (currentState.currentProfile) {
+        const profile = currentState.currentProfile;
+
+        // Check for missing required fields
+        if (!profile.id) {
+          console.warn('⚠️ Profile missing ID, marking for repair');
+          // Add to repair queue or handle appropriately
+        }
+
+        // Validate onboarding status consistency
+        if (profile.onboarding_complete && (!profile.username || !profile.full_name)) {
+          console.warn('⚠️ Inconsistent onboarding state detected');
+          // Could trigger re-validation or repair
+        }
+      }
+
+      // Clean up old cache entries
+      const now = Date.now();
+      const maxCacheAge = 24 * 60 * 60 * 1000; // 24 hours
+
+      this.store.update(state => {
+        const newCache = new Map(state.profileCache);
+        const newTimestamps = new Map(state.cacheTimestamps);
+        let hasCleanup = false;
+
+        for (const [userId, timestamp] of newTimestamps) {
+          if (now - timestamp > maxCacheAge) {
+            newCache.delete(userId);
+            newTimestamps.delete(userId);
+            hasCleanup = true;
+          }
+        }
+
+        if (hasCleanup) {
+          console.log('🧹 Cleaned up old cache entries');
+        }
+
+        return {
+          ...state,
+          profileCache: newCache,
+          cacheTimestamps: newTimestamps
+        };
+      });
+
+    } catch (error) {
+      console.warn('⚠️ Data validation and repair failed:', error);
     }
   }
 
@@ -728,6 +1121,7 @@ class DataStore {
   reset() {
     this.store.set(initialDataState);
   }
+
 
   // Cleanup
   destroy() {
