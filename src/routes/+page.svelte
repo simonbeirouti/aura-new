@@ -80,21 +80,63 @@
       return;
     }
 
-    try {
-      const result = await purchaseManager.purchaseProduct(productId, userId);
+    // Additional check: Prevent multiple clicks on same product
+    if ($purchaseLoading[productId]) {
+      console.log(`Purchase already in progress for ${productId}, ignoring click`);
+      return;
+    }
 
-      // Immediately update token balance without database call
-      userStore.updateTokenBalanceAfterPurchase(
-        result.newTokenBalance.tokenCost,
-      );
+    try {
+      console.log(`🛒 Starting purchase flow for ${productId}`);
+
+      await purchaseManager.purchaseProduct(productId, userId);
+
+      console.log(`✅ Purchase flow completed for ${productId}`);
 
       // Show success toast
       const product = purchaseManager.getProduct(productId);
       toast.success(`Successfully purchased ${product?.name || "product"}!`);
+
+      // Immediately refresh balance from database to ensure UI reflects purchase
+      // IAP listener will also update, but this ensures immediate feedback
+      console.log(`🔄 Refreshing balance after successful purchase for ${productId}`);
+      if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+        (window as any).logPlatformEvent('info', `Refreshing balance after purchase for ${productId}`, {
+          productId,
+          action: 'balance_refresh_after_purchase'
+        });
+      }
+      try {
+        await userStore.refreshTokenBalance(true);
+        console.log(`✅ Balance refreshed after purchase for ${productId}`);
+        if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+          (window as any).logPlatformEvent('info', `Balance successfully refreshed after purchase for ${productId}`, {
+            productId,
+            action: 'balance_refresh_success'
+          });
+        }
+      } catch (balanceError) {
+        console.warn(`⚠️ Failed to refresh balance after purchase:`, balanceError);
+        if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+          (window as any).logPlatformEvent('error', `Failed to refresh balance after purchase for ${productId}`, {
+            productId,
+            error: balanceError instanceof Error ? balanceError.message : String(balanceError),
+            action: 'balance_refresh_failed'
+          });
+        }
+        // Don't fail the purchase if balance refresh fails - IAP listener might still work
+      }
+
     } catch (err) {
-      // Show error toast instead of inline error
-      const errorMessage =
-        err instanceof Error ? err.message : "Purchase failed";
+      // Check if this is a "purchase already in progress" error
+      const errorMessage = err instanceof Error ? err.message : "Purchase failed";
+
+      if (errorMessage === "Purchase already in progress") {
+        console.log(`⚠️ Purchase already in progress for ${productId}`);
+        return; // Don't show error toast for this
+      }
+
+      console.error(`❌ Purchase failed for ${productId}:`, errorMessage);
       toast.error(errorMessage);
     }
   }

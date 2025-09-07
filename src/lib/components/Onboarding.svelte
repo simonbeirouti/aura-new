@@ -1,6 +1,7 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from "svelte";
-    import { centralizedAuth } from "../stores/unifiedAuth";
+    import { get } from "svelte/store";
+    import { centralizedAuth, shouldShowApp } from "../stores/unifiedAuth";
     import { loadingActions } from "../stores/loadingStore";
     import OnboardingIntro from "./onboarding/OnboardingIntro.svelte";
     import OnboardingSecurity from "./onboarding/OnboardingSecurity.svelte";
@@ -15,70 +16,77 @@
     let isAuthenticating = $state(false);
     let onboardingComplete = $state(false);
     let currentStep = $state(1);
-    
-    const shouldShowApp = centralizedAuth.shouldShowApp;
 
-    // Force re-evaluation of authentication state on component mount
-    // This helps ensure proper state after logout/restart
+    // Simplified reactive effects to prevent infinite loops
     $effect(() => {
-        // Trigger a re-check of authentication state
-        const isAuthenticated = $centralizedAuth.isAuthenticated;
-        const isInitialized = $centralizedAuth.isInitialized;
-        const isLoading = $centralizedAuth.isLoading;
-
-        // Auth state check - logging removed for production
-
-        // If we're not authenticated and initialized, ensure we're showing the right flow
-        if (!isAuthenticated && (isInitialized || isLoading)) {
-            // User not authenticated, showing auth flow
-        }
-    });
-
-    // Sync local states with centralized auth state
-    $effect(() => {
-        const wasCompleted = onboardingComplete;
-        onboardingComplete = centralizedAuth.isOnboardingCompleted();
-
-        // If onboarding was just marked as completed, dispatch the complete event
-        if (!wasCompleted && onboardingComplete) {
-            dispatch('complete');
-        }
-    });
-
-    $effect(() => {
+        // Only sync the current step when it changes
         const centralizedStep = centralizedAuth.getCurrentOnboardingStep();
+        console.log('Reactive effect running - centralizedStep:', centralizedStep, 'currentStep:', currentStep);
         if (centralizedStep !== currentStep) {
+            console.log('Onboarding step changed from', currentStep, 'to', centralizedStep);
             currentStep = centralizedStep;
+            if (centralizedStep === 4) {
+                console.log('User reached profile setup step (step 4)');
+            }
         }
     });
-    
-    onMount(() => {
-        // The reactive effect above will sync with the centralized auth state
-        // and dispatch 'complete' if onboarding was previously completed
+
+    // Additional effect to handle auth state changes that might affect step
+    $effect(() => {
+        const authState = get(centralizedAuth.getStore());
+        const isAuthenticated = authState.isAuthenticated;
+        const profileLoaded = authState.profileLoaded;
+
+        // If user becomes authenticated and profile is loaded, ensure we're on step 4
+        if (isAuthenticated && profileLoaded && currentStep !== 4) {
+            console.log('User authenticated with profile loaded, ensuring step 4');
+            centralizedAuth.setCurrentOnboardingStep(4);
+            currentStep = 4;
+        }
     });
-    
-    let wasAuthenticated = $state(false);
 
     $effect(() => {
-        const isAuth = $centralizedAuth.isAuthenticated;
-        const hasUser = !!$centralizedAuth.user;
+        // Only sync onboarding completion status
+        const newOnboardingComplete = centralizedAuth.isOnboardingCompleted();
+        if (newOnboardingComplete !== onboardingComplete) {
+            onboardingComplete = newOnboardingComplete;
 
-        if (isAuth && hasUser) {
-            wasAuthenticated = true;
+            // Dispatch complete event only once when onboarding becomes completed
+            if (!onboardingComplete && newOnboardingComplete) {
+                dispatch('complete');
+            }
         }
+    });
 
-        if (!isAuth && !hasUser && wasAuthenticated && currentStep === 4) {
-            centralizedAuth.resetOnboardingState();
-            wasAuthenticated = false;
-        }
+    onMount(() => {
+        // Sync initial state
+        currentStep = centralizedAuth.getCurrentOnboardingStep();
+        onboardingComplete = centralizedAuth.isOnboardingCompleted();
+    });
+
+    let isWaitingForProfile = $state(false);
+
+    // Update isWaitingForProfile based on auth state
+    $effect(() => {
+        const authState = get(centralizedAuth.getStore());
+        const isAuthenticated = authState.isAuthenticated;
+        const hasUser = !!authState.user;
+        const profileLoaded = authState.profileLoaded;
+
+        const newIsWaitingForProfile = isAuthenticated && hasUser && !profileLoaded && currentStep >= 4;
+        console.log('isWaitingForProfile calculation:', {
+            isAuthenticated,
+            hasUser,
+            profileLoaded,
+            currentStep,
+            currentStepGreaterThan4: currentStep >= 4,
+            result: newIsWaitingForProfile
         });
-    
-    const isWaitingForProfile = $derived(
-        $centralizedAuth.isAuthenticated && 
-        $centralizedAuth.user && 
-        !$centralizedAuth.profileLoaded
-    );
-    
+
+        isWaitingForProfile = newIsWaitingForProfile;
+    });
+
+    // Profile loading state management
     $effect(() => {
         if (isWaitingForProfile) {
             loadingActions.showProfile();
@@ -114,64 +122,53 @@
         try {
             // Add a small delay to ensure loading is visible
             await new Promise(resolve => setTimeout(resolve, 100));
-            // Wait for profile to load if not already loaded
-            if (!$centralizedAuth.profileLoaded) {
-                let attempts = 0;
-                const maxAttempts = 30; // Max 15 seconds (500ms * 30)
 
-                while (!$centralizedAuth.profileLoaded && attempts < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    attempts++;
-                }
-            }
+            // Get current auth state from store
+            const authState = get(centralizedAuth.getStore());
 
-            // If still not loaded after timeout, try to refresh
-            if (!$centralizedAuth.profileLoaded) {
+            // Ensure profile is loaded - try to refresh if needed
+            if (!authState.profileLoaded) {
                 try {
                     await centralizedAuth.refreshProfile();
-                    // Wait a bit more for the refresh to complete
+                    // Wait for profile loading to complete
                     await new Promise(resolve => setTimeout(resolve, 500));
                 } catch (error) {
-                    // Continue anyway - we'll handle this below
+                    console.warn('Profile refresh failed, continuing anyway:', error);
+                    // Mark as loaded to prevent infinite loading
+                    // Note: This might already be done in refreshProfile, but let's be safe
                 }
             }
 
-            // Now check onboarding status and decide what to do
-
-            if ($centralizedAuth.profileLoaded && $centralizedAuth.profile && $centralizedAuth.profile.onboarding_complete) {
-                // Onboarding already complete - mark as complete and go directly to main app
-                centralizedAuth.markOnboardingCompleted();
-                dispatch('complete');
-            } else if ($centralizedAuth.profileLoaded && $centralizedAuth.profile) {
-                // Profile is loaded but onboarding not complete - set step to profile setup
-                centralizedAuth.setCurrentOnboardingStep(4);
-            } else if ($centralizedAuth.isAuthenticated) {
-                // Profile failed to load but user is authenticated - create fallback profile and proceed
-
-                // Create a fallback profile with onboarding complete
-                const fallbackProfile = {
-                    id: $centralizedAuth.user?.id || 'unknown',
-                    onboarding_complete: true,
-                    username: null,
-                    full_name: null,
-                    avatar_url: null,
-                    updated_at: new Date().toISOString(),
-                    notifications: true
-                };
-
-                // Update the auth store with fallback profile
-                // We'll use a different approach since store is private
-                // The fallback will be handled by the unifiedAuth refreshProfile method
-
-                // Mark onboarding as complete and proceed to app
-                centralizedAuth.markOnboardingCompleted();
-                dispatch('complete');
-            } else {
-                // Profile still not loaded and not authenticated - keep current step
+            // Double-check that we're authenticated
+            if (!authState.isAuthenticated) {
+                console.warn('handleAuthSuccess called but user not authenticated');
+                return;
             }
 
-            // Force a minimum delay to prevent any microsecond flash
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Force step to 4 for profile setup - this should work for all authenticated users
+            console.log('Setting onboarding step to 4 for profile setup');
+            centralizedAuth.setCurrentOnboardingStep(4);
+
+            // Force local update immediately to ensure UI responds
+            currentStep = 4;
+
+            // Force a minimum delay to ensure step change takes effect
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            // Log current state for debugging
+            console.log('Auth success - current step:', centralizedAuth.getCurrentOnboardingStep());
+            console.log('Local current step:', currentStep);
+            console.log('Profile loaded:', authState.profileLoaded);
+            console.log('Profile:', authState.profile);
+
+        } catch (error) {
+            console.error('Error in handleAuthSuccess:', error);
+            // On error, still try to proceed to profile setup
+            const currentAuthState = get(centralizedAuth.getStore());
+            if (currentAuthState.isAuthenticated) {
+                centralizedAuth.setCurrentOnboardingStep(4);
+                currentStep = 4; // Force local update
+            }
         } finally {
             // Hide loading after decision is made and minimum delay
             loadingActions.hideApp();
@@ -186,26 +183,39 @@
         isAuthenticating = false;
     }
 
-    function handleProfileComplete() {
-        centralizedAuth.markOnboardingCompleted();
-        dispatch('complete');
+    async function handleProfileComplete() {
+        console.log('handleProfileComplete called - completing onboarding');
+        try {
+            // This will refresh the profile from database and mark onboarding as completed
+            await centralizedAuth.completeOnboarding();
+            console.log('Onboarding completed successfully');
+            dispatch('complete');
+        } catch (error) {
+            console.error('Error completing onboarding:', error);
+            // Still dispatch complete to avoid getting stuck
+            dispatch('complete');
+        }
     }
 </script>
 
 <!-- Onboarding content - layout controls when this component is rendered -->
+{console.log('Template rendering - onboardingComplete:', onboardingComplete, 'isWaitingForProfile:', isWaitingForProfile, 'currentStep:', currentStep)}
 {#if onboardingComplete}
   <!-- Onboarding already complete - don't show anything -->
 {:else if isWaitingForProfile}
     <!-- Let GlobalLoading handle this state -->
+    {console.log('Showing GlobalLoading because isWaitingForProfile is true')}
   {:else if currentStep === 3}
     <!-- Authentication Step (Step 3) -->
-    <OnboardingAuth 
+    {console.log('Rendering OnboardingAuth - currentStep:', currentStep)}
+    <OnboardingAuth
         on:authSuccess={handleAuthSuccess}
         on:authStart={handleAuthStart}
         on:authError={handleAuthError}
     />
-  {:else if currentStep === 4 && $centralizedAuth.profileLoaded && $centralizedAuth.profile && !$centralizedAuth.profile.onboarding_complete}
-    <!-- Profile Setup Step (Step 4) - Only show if profile is loaded, exists, and onboarding not yet complete -->
+  {:else if currentStep === 4}
+    <!-- Profile Setup Step (Step 4) - Show when step is 4, regardless of profile loading status -->
+    {console.log('Rendering OnboardingProfile - currentStep:', currentStep)}
     <OnboardingProfile on:complete={handleProfileComplete} />
   {:else}
     <!-- Regular Onboarding Layout for Steps 1 & 2 -->

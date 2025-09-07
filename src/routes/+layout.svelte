@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import { fade } from "svelte/transition";
   import "../app.css";
   import { ModeWatcher } from "mode-watcher";
@@ -9,16 +10,19 @@
   import Onboarding from "$lib/components/Onboarding.svelte";
   import FooterNavigation from "$lib/components/FooterNavigation.svelte";
   import SubscriptionManager from "$lib/components/SubscriptionManager.svelte";
-  import { centralizedAuth } from "$lib/stores/unifiedAuth";
+  import FloatingDebugger from "$lib/components/FloatingDebugger.svelte";
   import { loadingActions } from "$lib/stores/loadingStore";
   import { biometricActions, isBiometricAvailable } from "$lib/stores/biometricStore";
   import { toast } from "svelte-sonner";
   import { ShieldIcon } from "lucide-svelte";
 
-  $: shouldShowApp = centralizedAuth.shouldShowApp;
-  $: shouldShowOnboarding = centralizedAuth.shouldShowOnboarding;
-  $: shouldShowLogin = centralizedAuth.shouldShowLogin;
-  $: isReady = centralizedAuth.isReady;
+  // Import derived stores directly to avoid circular dependencies
+  import { shouldShowApp, shouldShowOnboarding, shouldShowLogin, centralizedAuth } from "$lib/stores/unifiedAuth";
+
+  // Get access to the main auth store
+  $: authStore = centralizedAuth.getStore();
+
+  // isReady is accessed directly from the auth store
 
   // Debug derived store values - logging removed for production
 
@@ -43,16 +47,22 @@
       }
 
       // Initialize biometric store only if user is authenticated
-      if (result.authReady && $centralizedAuth.isAuthenticated) {
-        await biometricActions.initialize();
+      const currentState = get(centralizedAuth.getStore());
+      if (result.authReady && currentState.isAuthenticated) {
+        try {
+          await biometricActions.initialize();
 
-        // Only check for startup auth if biometric is actually enabled
-        const settings = await biometricActions.loadSettings();
-        if (settings.enabled && settings.require_on_startup && $isBiometricAvailable) {
-          biometricAuthRequired = true;
-          loadingActions.hideApp();
-          await handleBiometricAuth();
-        } else {
+          // Only check for startup auth if biometric is actually enabled
+          const settings = await biometricActions.loadSettings();
+          if (settings && settings.enabled && settings.require_on_startup && $isBiometricAvailable) {
+            biometricAuthRequired = true;
+            loadingActions.hideApp();
+            await handleBiometricAuth();
+          } else {
+            biometricAuthComplete = true;
+          }
+        } catch (biometricError) {
+          console.warn('Biometric initialization failed, continuing without biometric auth:', biometricError);
           biometricAuthComplete = true;
         }
       } else {
@@ -93,7 +103,7 @@
 
   function handleOnboardingComplete() {
     // Check if onboarding is already complete to avoid unnecessary profile refresh
-    if ($centralizedAuth.profileLoaded && $centralizedAuth.profile?.onboarding_complete) {
+    if ($authStore.profileLoaded && $authStore.profile?.onboarding_complete) {
       // Onboarding already complete, immediately hide loading and return
       // No need for delays or profile refresh
       loadingActions.hideApp();
@@ -117,10 +127,26 @@
     }, 300);
   }
 
-  // Ensure loading is cleared when app should be shown
-  $: if ($shouldShowApp && initializationComplete) {
-    loadingActions.hideApp();
+  // Force hide loading after a timeout to prevent infinite loading
+  let loadingTimeout: NodeJS.Timeout | null = null;
+
+  $: if (initializationComplete && !biometricAuthRequired) {
+    // Clear any existing timeout
+    if (loadingTimeout) {
+      clearTimeout(loadingTimeout);
+    }
+    // Set new timeout to hide loading
+    loadingTimeout = setTimeout(() => {
+      loadingActions.hideApp();
+    }, 2000);
   }
+
+  // Cleanup timeout on destroy
+  onDestroy(() => {
+    if (loadingTimeout) {
+      clearTimeout(loadingTimeout);
+    }
+  });
 </script>
 
 <div class="fixed inset-0 flex flex-col" style="height: 100vh; max-height: 100vh; overflow: hidden;">
@@ -157,20 +183,15 @@
         </div>
       </div>
     </div>
-  {:else if !$isReady}
-    <!-- Let GlobalLoading handle this state -->
   {:else}
-    <!-- Conditionally render onboarding component based on auth state -->
-    {#if $shouldShowOnboarding || $shouldShowLogin}
-      <Onboarding on:complete={handleOnboardingComplete} />
-    {:else if !$shouldShowApp && !$centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized}
-      <!-- Fallback: Show onboarding when not authenticated but initialized -->
+    <!-- Show login for unauthenticated users -->
+    {#if $shouldShowLogin}
       <Onboarding on:complete={handleOnboardingComplete} />
     {/if}
 
-    <!-- Main app content - only show when authenticated and onboarding complete -->
+    <!-- Main app content - show when authenticated and biometric check passed -->
     {#if $shouldShowApp && biometricAuthComplete}
-      <div in:fade={{ duration: 400 }}>
+      <div in:fade={{ duration: 400 }} class="relative">
         <SubscriptionManager />
 
         <div class="flex-1" style="height: calc(100vh - 4rem); max-height: calc(100vh - 4rem); overflow: hidden;">
@@ -179,6 +200,13 @@
         <div style="height: 4rem; min-height: 4rem; max-height: 4rem; flex-shrink: 0;">
           <FooterNavigation />
         </div>
+
+        <!-- Show onboarding as overlay for authenticated users who haven't completed it -->
+        {#if $shouldShowOnboarding}
+          <div class="absolute inset-0 z-50">
+            <Onboarding on:complete={handleOnboardingComplete} />
+          </div>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -187,3 +215,6 @@
 <ModeWatcher />
 <Toaster position="top-center" />
 <GlobalLoading />
+
+<!-- Floating Debugger -->
+<FloatingDebugger />

@@ -115,8 +115,15 @@ class PurchaseManager {
     }
   }
 
-  // Purchase product with cache invalidation
-  async purchaseProduct(productId: string, userId: string): Promise<{ purchase: any; newTokenBalance: any }> {
+  // Purchase product with cache invalidation and deduplication
+  async purchaseProduct(productId: string, userId: string): Promise<{ purchase: any }> {
+    // Check if purchase is already in progress for this product
+    const currentState = get(this.store);
+    if (currentState.purchaseLoading[productId]) {
+      console.log(`Purchase already in progress for ${productId}, skipping`);
+      throw new Error('Purchase already in progress');
+    }
+
     this.store.update(state => ({
       ...state,
       purchaseLoading: { ...state.purchaseLoading, [productId]: true },
@@ -130,24 +137,40 @@ class PurchaseManager {
         throw new Error('Product not found');
       }
 
-      // Execute purchase
+      console.log(`🔄 Initiating purchase for ${productId} by user ${userId}`);
+
+      // Execute purchase through Tauri backend
       const purchase = await invoke('purchase_product', { productId, userId });
+
+      console.log(`✅ Purchase completed for ${productId}:`, purchase);
 
       // Invalidate relevant caches
       cacheManager.handlePurchaseCompletion(userId);
-      
+
       // Also invalidate products cache in case purchase affects availability
       cacheManager.delete(PRODUCTS_CACHE_KEY);
 
-      // Return purchase result and token cost for immediate balance update
-      return { 
-        purchase, 
-        newTokenBalance: { tokenCost: product.token_cost }
+      console.log(`✅ Purchase ${productId} completed successfully`);
+
+      // Clear purchase error for this product
+      this.clearPurchaseError(productId);
+
+      // Return purchase result
+      return {
+        purchase
       };
 
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Purchase failed';
-      
+
+      console.error(`❌ Purchase failed for ${productId}:`, errorMessage);
+
+      // Store error in state for UI feedback
+      this.store.update(state => ({
+        ...state,
+        purchaseErrors: { ...state.purchaseErrors, [productId]: errorMessage }
+      }));
+
       // Show toast error instead of storing in state
       toast.error(`Purchase failed: ${errorMessage}`);
       throw err;
@@ -163,6 +186,12 @@ class PurchaseManager {
   getProduct(productId: string): Product | undefined {
     const state = get(this.store);
     return state.products.find(p => p.id === productId);
+  }
+
+  // Get purchase loading state for a product
+  getPurchaseLoadingState(productId: string): boolean {
+    const state = get(this.store);
+    return state.purchaseLoading[productId] || false;
   }
 
   // Check if products need refresh (daily or if cache expired)
@@ -204,6 +233,23 @@ class PurchaseManager {
 
 // Create and export purchase manager instance
 export const purchaseManager = new PurchaseManager();
+
+// Handle app visibility changes to clear stale purchase states
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      console.log('📱 App came to foreground, clearing stale purchase states in purchase store');
+      purchaseManager.clearAllPurchaseErrors();
+
+      // Clear any loading states that might be stuck
+      purchaseManager.store.update(state => ({
+        ...state,
+        purchaseLoading: {},
+        purchaseErrors: {}
+      }));
+    }
+  });
+}
 
 // Derived stores for convenient access
 export const products = derived(

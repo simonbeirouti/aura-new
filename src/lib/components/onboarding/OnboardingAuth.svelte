@@ -193,10 +193,14 @@
                 );
                 // Mark auth as completed to prevent viewport reset
                 authCompleted = true;
-                // Hide loading after successful signup
+
+                // Wait a moment for state to settle, then proceed with onboarding
+                await new Promise(resolve => setTimeout(resolve, 500));
+
+                // Clean up loading states and dispatch success
+                loginLoading = false;
                 loadingStore.hide("auth_process");
-                // For signup, don't dispatch success immediately - wait for email verification
-                // The unified auth store will handle the state changes when email is confirmed
+                dispatch("authSuccess");
             } else {
                 await centralizedAuth.handleLogin(
                     email.trim(),
@@ -208,13 +212,15 @@
                 // Wait at least 1 second for state to settle and prevent flash
                 await new Promise(resolve => setTimeout(resolve, 1000));
 
-                // Hide loading and dispatch success
+                // Clean up loading states and dispatch success
+                loginLoading = false;
                 loadingStore.hide("auth_process");
                 dispatch("authSuccess");
             }
                 } catch (error) {
 
-            // Clean up loading state
+            // Clean up loading states
+            loginLoading = false;
             loadingStore.hide("auth_process");
 
             // Extract meaningful error message from Supabase

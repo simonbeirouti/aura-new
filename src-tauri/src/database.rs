@@ -43,23 +43,27 @@ pub async fn init_database(
 
 // Get authenticated database configuration from session store
 pub async fn get_authenticated_db(app: &tauri::AppHandle) -> Result<DatabaseConfig, String> {
+    println!("Database: Getting authenticated DB config");
     let store = app.store("session.store")
         .map_err(|e| format!("Failed to access session store: {}", e))?;
-    
+
     // Get stored tokens (using same keys as session.rs)
     let access_token = store.get("sb-access-token")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .ok_or("No access token found in session")?;
-    
+
     // Get stored configuration
     let anon_key = store.get("anon_key")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .ok_or("No anon key found in session")?;
-    
+
     let database_url = store.get("database_url")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .ok_or("No database URL found in session")?;
-    
+
+    println!("Database: DB config retrieved - has access_token: {}, has anon_key: {}, database_url: {}",
+             !access_token.is_empty(), !anon_key.is_empty(), !database_url.is_empty());
+
     Ok(DatabaseConfig {
         database_url,
         access_token,
@@ -98,30 +102,43 @@ pub async fn get_user_profile(
     user_id: String,
     app: tauri::AppHandle,
 ) -> Result<Option<Profile>, String> {
+    println!("Database: Getting user profile for user_id: {}", user_id);
     let db_config = get_authenticated_db(&app).await?;
+    println!("Database: DB config retrieved successfully");
     let client = reqwest::Client::new();
-    
+
     let url = format!("{}/rest/v1/profiles", db_config.database_url);
-    
+    println!("Database: Making request to: {}", url);
+
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", db_config.access_token))
         .header("apikey", &db_config.anon_key)
-        .query(&[("id", format!("eq.{}", user_id))])
+        .query(&[
+            ("id", format!("eq.{}", user_id)),
+            ("select", "id,updated_at,username,full_name,avatar_url,onboarding_complete,notifications".to_string())
+        ])
         .send()
         .await
         .map_err(|e| format!("Failed to fetch profile: {}", e))?;
-    
+
+    println!("Database: Response status: {}", response.status());
+
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
+        println!("Database: Error response: {}", error_text);
         return Err(format!("Database error: {}", error_text));
     }
-    
-    let profiles: Vec<Profile> = response
-        .json()
-        .await
+
+    // Log the raw response body before parsing
+    let response_text = response.text().await.map_err(|e| format!("Failed to read response: {}", e))?;
+    println!("Database: Raw response body: {}", response_text);
+
+    // Parse the JSON
+    let profiles: Vec<Profile> = serde_json::from_str(&response_text)
         .map_err(|e| format!("Failed to parse profile response: {}", e))?;
-    
+
+    println!("Database: Retrieved profiles: {:?}", profiles);
     Ok(profiles.into_iter().next())
 }
 
@@ -136,10 +153,13 @@ pub async fn update_user_profile(
     notifications: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<Option<Profile>, String> {
+    println!("Database: Updating user profile for user_id: {}", user_id);
+    println!("Database: Update params - username: {:?}, full_name: {:?}, avatar_url: {:?}, onboarding_complete: {:?}", username, full_name, avatar_url, onboarding_complete);
     let db_config = get_authenticated_db(&app).await?;
     let client = reqwest::Client::new();
-    
+
     let url = format!("{}/rest/v1/profiles", db_config.database_url);
+    println!("Database: Update URL: {}", url);
     
     let mut update_data = HashMap::new();
     if let Some(username) = username {
@@ -159,6 +179,7 @@ pub async fn update_user_profile(
     }
     update_data.insert("updated_at", serde_json::json!(chrono::Utc::now().to_rfc3339()));
     
+    println!("Database: Update data: {:?}", update_data);
     let response = client
         .patch(&url)
         .header("Authorization", format!("Bearer {}", db_config.access_token))
@@ -170,17 +191,21 @@ pub async fn update_user_profile(
         .send()
         .await
         .map_err(|e| format!("Failed to update profile: {}", e))?;
-    
+
+    println!("Database: Update response status: {}", response.status());
+
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
+        println!("Database: Update failed with error: {}", error_text);
         return Err(format!("Database error: {}", error_text));
     }
-    
+
     let profiles: Vec<Profile> = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse update response: {}", e))?;
-    
+
+    println!("Database: Updated profiles: {:?}", profiles);
     Ok(profiles.into_iter().next())
 }
 
@@ -195,10 +220,13 @@ pub async fn create_user_profile(
     notifications: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<Option<Profile>, String> {
+    println!("Database: Creating user profile for user_id: {}", user_id);
+    println!("Database: Create params - username: {:?}, full_name: {:?}, avatar_url: {:?}, onboarding_complete: {:?}", username, full_name, avatar_url, onboarding_complete);
     let db_config = get_authenticated_db(&app).await?;
     let client = reqwest::Client::new();
-    
+
     let url = format!("{}/rest/v1/profiles", db_config.database_url);
+    println!("Database: Create URL: {}", url);
     
     let mut profile_data = HashMap::new();
     profile_data.insert("id", serde_json::json!(user_id));
@@ -219,6 +247,7 @@ pub async fn create_user_profile(
     }
     profile_data.insert("updated_at", serde_json::json!(chrono::Utc::now().to_rfc3339()));
     
+    println!("Database: Create data: {:?}", profile_data);
     let response = client
         .post(&url)
         .header("Authorization", format!("Bearer {}", db_config.access_token))
@@ -229,17 +258,21 @@ pub async fn create_user_profile(
         .send()
         .await
         .map_err(|e| format!("Failed to create profile: {}", e))?;
-    
+
+    println!("Database: Create response status: {}", response.status());
+
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
+        println!("Database: Create failed with error: {}", error_text);
         return Err(format!("Database error: {}", error_text));
     }
-    
+
     let profiles: Vec<Profile> = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse create response: {}", e))?;
-    
+
+    println!("Database: Created profiles: {:?}", profiles);
     Ok(profiles.into_iter().next())
 }
 

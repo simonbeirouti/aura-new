@@ -103,6 +103,7 @@ class UnifiedAuthStore {
   private store = writable<UnifiedAuthState>(initialState);
   private refreshTimer: NodeJS.Timeout | null = null;
   private iapSyncTimer: NodeJS.Timeout | null = null;
+  private healthCheckTimer: NodeJS.Timeout | null = null;
 
   // Store subscription
   subscribe = this.store.subscribe;
@@ -113,67 +114,6 @@ class UnifiedAuthStore {
     $state => $state.isInitialized && !$state.isLoading
   );
 
-  readonly shouldShowApp = derived(
-    this.store,
-    $state => {
-      // Only show app if:
-      // 1. User is authenticated
-      // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Profile exists and onboarding is complete
-      // 4. System is fully initialized
-      const isAuthenticated = $state.isAuthenticated;
-      const profileLoaded = $state.profileLoaded;
-      const profile = $state.profile;
-      const isInitialized = $state.isInitialized;
-
-      const result = isAuthenticated && profileLoaded && profile && profile.onboarding_complete;
-
-      // Debug logging for shouldShowApp logic - removed for production
-
-      // Don't show app until everything is fully initialized
-      if (!isInitialized) {
-        return false;
-      }
-
-      // Only show app if authenticated, profile loaded, and onboarding complete
-      return result;
-    }
-  );
-
-  readonly shouldShowOnboarding = derived(
-    this.store,
-    $state => {
-      // Only show onboarding if:
-      // 1. User is authenticated
-      // 2. Profile loading is complete (profileLoaded: true)
-      // 3. Profile either doesn't exist or onboarding is not complete
-      // 4. We have waited long enough to ensure stable state (prevent flash)
-      const isAuthenticated = $state.isAuthenticated;
-      const profileLoaded = $state.profileLoaded;
-      const profile = $state.profile;
-      const isInitialized = $state.isInitialized;
-
-      const result = isAuthenticated && profileLoaded && (!profile || !profile.onboarding_complete);
-
-      // Don't show onboarding until everything is fully initialized
-      if (!isInitialized) {
-        return false;
-      }
-
-      // If profile is still loading, don't show onboarding yet to prevent flash
-      if (isAuthenticated && !profileLoaded) {
-        return false;
-      }
-
-      // Only show onboarding if authenticated, profile loaded, and onboarding not complete
-      return result;
-    }
-  );
-
-  readonly shouldShowLogin = derived(
-    this.store,
-    $state => !$state.isAuthenticated && ($state.isInitialized || $state.isLoading)
-  );
 
   /**
    * Initialize the entire application authentication and data layer
@@ -184,7 +124,16 @@ class UnifiedAuthStore {
     // Check if we're already in a logged-out state (isInitialized: true, isAuthenticated: false)
     // This prevents re-initialization after logout
     const currentState = get(this.store);
+    console.log('UnifiedAuth initialize - current state:', {
+      isInitialized: currentState.isInitialized,
+      isAuthenticated: currentState.isAuthenticated,
+      isLoading: currentState.isLoading,
+      hasUser: !!currentState.user,
+      hasSession: !!currentState.session
+    });
+
     if (currentState.isInitialized && !currentState.isAuthenticated && !currentState.isLoading) {
+      console.log('Already in logged-out state, skipping initialization');
       return {
         authReady: false,
         profileReady: false,
@@ -195,6 +144,7 @@ class UnifiedAuthStore {
 
     // Force reset to unauthenticated state on app restart to ensure clean slate
     // This prevents cached authentication state from persisting across app restarts
+    console.log('Forcing reset to unauthenticated state for clean initialization');
     this.store.set({
       isInitialized: false,
       isAuthenticated: false,
@@ -219,48 +169,95 @@ class UnifiedAuthStore {
     };
 
     try {
+      // Step 0: Clear any stale cache data first
+      await this.clearStaleCacheData();
+
       // Step 1: Initialize core systems
       await storeManager.initialize();
 
-      // Step 2: Initialize authentication (this will check for valid stored tokens)
+      // Step 2: Initialize authentication with enhanced validation
       const authSuccess = await this.initializeAuth();
       result.authReady = authSuccess;
 
       // Step 3: Additional validation - double-check if we're really authenticated
+      // Re-enabled with better timing and error handling
       const currentState = get(this.store);
+      console.log('Step 3 validation - current state:', {
+        isAuthenticated: currentState.isAuthenticated,
+        hasUser: !!currentState.user,
+        hasSession: !!currentState.session
+      });
+
       if (currentState.isAuthenticated && currentState.user) {
+        // Add delay to allow Supabase session to fully establish
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
         try {
+          console.log('Performing additional Supabase session validation...');
+
           // Try to get a fresh session from Supabase to validate
           const { data: { session }, error } = await supabase.auth.getSession();
+          console.log('Supabase session validation result:', {
+            hasSession: !!session,
+            hasError: !!error,
+            sessionUserId: session?.user?.id,
+            storedUserId: currentState.user.id
+          });
 
           if (error || !session || !session.user) {
-            await this.setUnauthenticated('Session expired or invalid');
-            result.authReady = false;
+            console.warn('Session validation failed:', error?.message || 'No session');
+            // Don't immediately reset authentication - give it another chance
+            console.log('Retrying session validation in 2 seconds...');
+
+            // Wait and retry once
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const { data: { session: retrySession }, error: retryError } = await supabase.auth.getSession();
+
+            if (retryError || !retrySession || !retrySession.user) {
+              console.error('Session validation failed on retry, resetting authentication');
+              await this.setUnauthenticated('Session validation failed after retry');
+              result.authReady = false;
+            } else {
+              console.log('Session validation passed on retry');
+            }
+          } else {
+            // Validate that the session user matches our stored user
+            if (session.user.id !== currentState.user.id) {
+              console.warn('Session user mismatch, resetting authentication');
+              await this.setUnauthenticated('Session user mismatch');
+              result.authReady = false;
+            } else {
+              console.log('Session validation passed - user matches');
+            }
           }
         } catch (validationError) {
-          await this.setUnauthenticated('Session validation failed');
-          result.authReady = false;
+          console.error('Session validation error:', validationError);
+          // Don't reset authentication on network/timing errors
+          console.warn('Session validation failed due to error, but keeping authentication state');
+          // result.authReady remains true from initializeAuth success
         }
+      } else {
+        console.log('Skipping session validation - not authenticated');
       }
 
-      // Step 4: Load profile if still authenticated after validation
-      const stateAfterValidation = get(this.store);
-      if (stateAfterValidation.isAuthenticated && stateAfterValidation.user) {
+      // Step 4: Load profile if authenticated
+      const profileState = get(this.store);
+      if (profileState.isAuthenticated && profileState.user) {
         try {
           await dataActions.initialize();
 
           // First try without cache to get fresh data
-          let profile = await dataActions.getUserProfile(stateAfterValidation.user.id, false);
+          let profile = await dataActions.getUserProfile(profileState.user.id, false);
 
           // If that fails, try with cache (might have stale data)
           if (!profile) {
-            profile = await dataActions.getUserProfile(stateAfterValidation.user.id, true);
+            profile = await dataActions.getUserProfile(profileState.user.id, true);
           }
 
           // If we still don't have a profile, try one more time with force refresh
           if (!profile) {
             try {
-              profile = await dataActions.getUserProfile(stateAfterValidation.user.id, false);
+              profile = await dataActions.getUserProfile(profileState.user.id, false);
             } catch (refreshError) {
               // Continue silently on profile refresh error
             }
@@ -351,52 +348,135 @@ class UnifiedAuthStore {
   }
 
   /**
-   * Initialize authentication layer
+   * Clear stale cache data that might be invalid after app restart or long inactivity
+   */
+  private async clearStaleCacheData(): Promise<void> {
+    try {
+      // Import cache manager dynamically to avoid circular dependencies
+      const { cacheManager } = await import('./cacheManager');
+
+      // Clear cache if it's older than 1 hour (app was closed for a while)
+      const lastCacheUpdate = cacheManager.getStats().lastCleanup;
+      const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+      if (lastCacheUpdate < oneHourAgo) {
+        console.log('Clearing stale cache data due to long inactivity');
+        cacheManager.clear();
+      }
+
+      // Also clear any user-specific cache that's older than 30 minutes
+      // This ensures fresh data after app restart
+      const cacheKeys = cacheManager.getStats();
+      // Note: We'll implement more sophisticated cache invalidation in the cache manager itself
+
+    } catch (error) {
+      console.warn('Failed to clear stale cache data:', error);
+    }
+  }
+
+  /**
+   * Initialize authentication layer with enhanced session validation
    */
   private async initializeAuth(): Promise<boolean> {
     try {
       // Load session data from persistent store
       await sessionStore.load();
 
-      // Check if we have valid stored session
-      const hasValidSession = await sessionStore.hasValidSession();
+      // Check if we have valid stored session with timeout
+      const sessionCheckPromise = sessionStore.hasValidSession();
+      const timeoutPromise = new Promise<boolean>((_, reject) =>
+        setTimeout(() => reject(new Error('Session check timeout')), 5000)
+      );
+
+      let hasValidSession = false;
+      try {
+        hasValidSession = await Promise.race([sessionCheckPromise, timeoutPromise]);
+      } catch (timeoutError) {
+        console.warn('Session check timed out, proceeding with fresh validation');
+        hasValidSession = false;
+      }
 
       if (hasValidSession) {
-        // Try to restore session from stored tokens
+        console.log('Valid session found, attempting to restore from stored tokens...');
+        // Try to restore session from stored tokens with enhanced validation
         const tokens = await sessionStore.getStoredTokens();
         if (tokens) {
-          // Initialize Supabase client
-          if (!supabaseUrl || !supabaseAnonKey) {
-            throw new Error('Missing Supabase configuration');
+          console.log('Tokens retrieved, attempting Supabase session restoration...');
+          // Check if we have a recent session state with valid expiry
+          const currentState = get(this.store);
+          const now = Date.now();
+          const tokenExpiryBuffer = 5 * 60 * 1000; // 5 minutes buffer
+
+          // Check if tokens are close to expiry (if we have expiry info)
+          const hasValidExpiry = currentState.tokenExpiresAt && currentState.tokenExpiresAt > (now + tokenExpiryBuffer);
+
+          if (tokens.refreshToken && (!currentState.tokenExpiresAt || hasValidExpiry)) {
+            try {
+              // Use the centralized Supabase client
+              if (!supabaseUrl || !supabaseAnonKey) {
+                throw new Error('Missing Supabase configuration');
+              }
+
+              console.log('Setting Supabase session with stored tokens...');
+              // Set the session using stored tokens
+              const { data, error } = await supabase.auth.setSession({
+                access_token: tokens.accessToken,
+                refresh_token: tokens.refreshToken
+              });
+
+              if (!error && data.session) {
+                console.log('Supabase session restored successfully, setting authenticated state...');
+                await this.setAuthenticated(data.session.user, data.session);
+                console.log('Authentication state set successfully');
+                return true;
+              } else {
+                console.warn('Failed to restore session with stored tokens:', error);
+              }
+            } catch (restoreError) {
+              console.warn('Session restoration failed:', restoreError);
+            }
+          } else {
+            console.log('Stored tokens are expired or close to expiry');
           }
-          
-          const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
-          
-          // Restore session if available
-          const { data: { session } } = await supabaseClient.auth.getSession();
-          if (session) {
-            await sessionStore.setAuthenticated(session.user, session);
-          }
+        } else {
+          console.warn('No stored tokens found despite valid session check');
         }
       }
 
-      // No valid session found, check current Supabase session
-      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      // Fallback: Check current Supabase session (fresh validation)
+      // Only check this if we didn't successfully restore from stored tokens above
+      console.log('Checking for existing Supabase session as fallback...');
+      const { data: { session: currentSession }, error: sessionError } = await supabase.auth.getSession();
 
-      if (currentSession) {
-        // Store the current session tokens
-        await this.setAuthenticated(currentSession.user, currentSession);
-        return true;
-      } else {
-        // No session found
-        await this.setUnauthenticated();
-        return true;
+      if (sessionError) {
+        console.warn('Supabase session check failed:', sessionError);
       }
+
+      if (currentSession && currentSession.user) {
+        // Validate session is not expired
+        const now = Date.now();
+        const sessionExpiry = currentSession.expires_at ? currentSession.expires_at * 1000 : null;
+
+        if (!sessionExpiry || sessionExpiry > now) {
+          console.log('Valid Supabase session found via fallback, setting authenticated');
+          await this.setAuthenticated(currentSession.user, currentSession);
+          return true;
+        } else {
+          console.log('Supabase session is expired');
+        }
+      }
+
+      // No valid session found anywhere
+      console.log('No valid session found after all checks, setting unauthenticated');
+      await this.setUnauthenticated();
+      return false; // Return false to indicate no authentication was established
+
     } catch (error) {
+      console.error('Authentication initialization failed:', error);
       await this.setUnauthenticated(
         error instanceof Error ? error.message : 'Authentication failed'
       );
-      return false;
+      return false; // Return false to indicate authentication failed
     }
   }
 
@@ -405,6 +485,14 @@ class UnifiedAuthStore {
    */
   private async setAuthenticated(user: User, session: AuthSession): Promise<void> {
     const now = Date.now();
+    console.log('🔐 Setting authenticated state for user:', user.id);
+
+    const previousState = get(this.store);
+    console.log('Previous auth state:', {
+      wasAuthenticated: previousState.isAuthenticated,
+      hadUser: !!previousState.user,
+      hadSession: !!previousState.session
+    });
 
     this.store.update(state => ({
       ...state,
@@ -416,6 +504,8 @@ class UnifiedAuthStore {
       lastActivity: now,
       tokenExpiresAt: session.expires_at ? session.expires_at * 1000 : null
     }));
+
+    console.log('✅ Authenticated state updated in unifiedAuth store');
 
     // Store tokens securely in Tauri and session store
     try {
@@ -456,12 +546,17 @@ class UnifiedAuthStore {
 
     // Start token refresh monitoring
     this.scheduleTokenRefresh();
+
+    // Start health check monitoring with safeguards
+    this.startHealthCheck();
   }
 
   /**
    * Set unauthenticated state
    */
   private async setUnauthenticated(error?: string): Promise<void> {
+    console.log('Setting unauthenticated state, error:', error);
+
     // Clear timers
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
@@ -526,13 +621,8 @@ class UnifiedAuthStore {
     this.store.update(state => ({ ...state, isLoading: true, error: null }));
 
     try {
-      // Direct Supabase auth
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-      
-      const { data, error } = await supabaseClient.auth.signUp({
+      // Use centralized Supabase client
+      const { data, error } = await supabase.auth.signUp({
         email,
         password
       });
@@ -565,13 +655,8 @@ class UnifiedAuthStore {
     this.store.update(state => ({ ...state, isLoading: true, error: null }));
 
     try {
-      // Direct Supabase auth
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-      
-      const { data, error } = await supabaseClient.auth.signInWithPassword({
+      // Use centralized Supabase client
+      const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password
       });
@@ -602,16 +687,11 @@ class UnifiedAuthStore {
   async handleLogout(): Promise<void> {
     // Always force complete logout regardless of errors
     try {
-      // Step 1: Clear Supabase session
-      const supabaseClient = createClient(
-        import.meta.env.VITE_SUPABASE_URL,
-        import.meta.env.VITE_SUPABASE_ANON_KEY
-      );
-
+      // Step 1: Clear Supabase session using centralized client
       // Try both global and local signout
       await Promise.allSettled([
-        supabaseClient.auth.signOut(),
-        supabaseClient.auth.signOut({ scope: 'local' })
+        supabase.auth.signOut(),
+        supabase.auth.signOut({ scope: 'local' })
       ]);
     } catch (error) {
       // Continue with logout process even if Supabase cleanup fails
@@ -706,11 +786,21 @@ class UnifiedAuthStore {
     }
 
     try {
-      const profile = await dataActions.getUserProfile(state.user.id, true); // Force refresh
+      console.log('Refreshing profile from database for user:', state.user.id);
+      const profile = await dataActions.getUserProfile(state.user.id, false); // Force refresh from database
+      console.log('Profile fetched from database:', profile);
 
-      this.store.update(s => ({ ...s, profile, profileLoaded: true }));
+      this.store.update(s => ({
+        ...s,
+        profile,
+        profileLoaded: true,
+        onboardingCompleted: profile?.onboarding_complete || false
+      }));
+      console.log('Profile updated in store');
     } catch (error) {
+      console.warn('Profile refresh failed:', error);
       // Even on failure, mark profile as loaded to prevent UI getting stuck
+      // But don't update the profile data to avoid overwriting valid cached data
       this.store.update(s => ({ ...s, profileLoaded: true }));
       throw error;
     }
@@ -720,9 +810,26 @@ class UnifiedAuthStore {
    * Handle onboarding completion
    */
   async completeOnboarding(): Promise<void> {
+    console.log('completeOnboarding called - marking onboarding as completed');
     // Mark onboarding as completed in the store
-    this.store.update(state => ({ ...state, onboardingCompleted: true }));
-    await this.refreshProfile();
+    this.store.update(state => ({
+      ...state,
+      onboardingCompleted: true,
+      // Also update the profile onboarding_complete field if it exists
+      profile: state.profile ? { ...state.profile, onboarding_complete: true } : state.profile
+    }));
+    console.log('Local onboardingCompleted flag set to true');
+
+    // Wait a bit for database changes to be committed before refreshing
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Refresh profile from database to get updated onboarding_complete field
+    try {
+      await this.refreshProfile();
+      console.log('Profile refreshed from database after onboarding completion');
+    } catch (error) {
+      console.warn('Profile refresh failed after onboarding completion, but continuing:', error);
+    }
   }
 
   /**
@@ -866,8 +973,13 @@ class UnifiedAuthStore {
    */
   private async clearAllCaches(): Promise<void> {
     try {
-      // Clear cache manager
+      // Clear cache manager with user-specific invalidation
       const { cacheManager } = await import('./cacheManager');
+      const state = get(this.store);
+      if (state.user?.id) {
+        cacheManager.invalidateUserCache(state.user.id);
+      }
+      // Clear remaining cache
       cacheManager.clear();
 
       // Clear any persistent store data
@@ -892,7 +1004,10 @@ class UnifiedAuthStore {
 
       // Clear data store
       dataStore.reset();
+
+      console.log('All caches cleared successfully');
     } catch (error) {
+      console.warn('Some caches failed to clear:', error);
       // Continue with logout even if some caches fail to clear
     }
   }
@@ -924,6 +1039,103 @@ class UnifiedAuthStore {
   }
 
   /**
+   * Start periodic health check for session and cache validity
+   */
+  private startHealthCheck(): void {
+    // Clear existing timer
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+    }
+
+    // Run health check every 5 minutes
+    this.healthCheckTimer = setInterval(async () => {
+      await this.performHealthCheck();
+    }, 5 * 60 * 1000); // 5 minutes
+
+    // Also run an immediate health check after 30 seconds
+    setTimeout(async () => {
+      await this.performHealthCheck();
+    }, 30000);
+  }
+
+  /**
+   * Perform comprehensive health check
+   */
+  private async performHealthCheck(): Promise<void> {
+    const state = get(this.store);
+
+    // Skip health check if not authenticated
+    if (!state.isAuthenticated || !state.user) {
+      return;
+    }
+
+    try {
+      console.log('🔍 Performing health check...');
+
+      // Check 1: Session validity (be gentle - don't reset auth on single failure)
+      try {
+        const sessionValid = await sessionStore.hasValidSession();
+        if (!sessionValid) {
+          console.log('⚠️ Session check failed, attempting refresh...');
+          await this.refreshSession();
+          return;
+        }
+      } catch (sessionError) {
+        console.warn('⚠️ Session validation error during health check:', sessionError);
+        // Don't reset auth on session check errors
+      }
+
+      // Check 2: Token expiry (refresh if needed)
+      try {
+        if (sessionStore.isTokenRefreshNeeded()) {
+          console.log('⚠️ Token refresh needed...');
+          await this.refreshSession();
+          return;
+        }
+      } catch (tokenError) {
+        console.warn('⚠️ Token validation error during health check:', tokenError);
+        // Continue with other checks
+      }
+
+      // Check 3: Cache validity (clear old cache)
+      try {
+        const { cacheManager } = await import('./cacheManager');
+        const lastCleanup = cacheManager.getStats().lastCleanup;
+        const now = Date.now();
+        const oneHour = 60 * 60 * 1000;
+
+        if (now - lastCleanup > oneHour) {
+          console.log('🧹 Clearing stale cache...');
+          cacheManager.clear();
+        }
+      } catch (cacheError) {
+        console.warn('⚠️ Cache cleanup error during health check:', cacheError);
+      }
+
+      // Check 4: Profile data freshness (only refresh if onboarding is complete and it's been a while)
+      if (state.profileLoaded && state.profile && state.onboardingCompleted) {
+        try {
+          const profileAge = Date.now() - (state.lastActivity || 0);
+          const maxProfileAge = 30 * 60 * 1000; // 30 minutes
+
+          if (profileAge > maxProfileAge) {
+            console.log('📋 Refreshing stale profile data...');
+            await this.refreshProfile();
+          }
+        } catch (profileError) {
+          console.warn('⚠️ Profile refresh error during health check:', profileError);
+        }
+      }
+
+      console.log('✅ Health check completed successfully');
+
+    } catch (error) {
+      console.warn('⚠️ Health check failed:', error);
+      // Don't fail the entire app on health check errors
+    }
+  }
+
+  /**
    * Destroy store and cleanup
    */
   destroy(): void {
@@ -934,6 +1146,10 @@ class UnifiedAuthStore {
     if (this.iapSyncTimer) {
       clearTimeout(this.iapSyncTimer);
       this.iapSyncTimer = null;
+    }
+    if (this.healthCheckTimer) {
+      clearInterval(this.healthCheckTimer);
+      this.healthCheckTimer = null;
     }
   }
 }
@@ -946,24 +1162,33 @@ export const centralizedAuth = authStore;
 
 // Export derived stores as separate exports
 export const shouldShowApp = derived(authStore.getStore(), $state => {
-  // Only show app if:
+  // Show app if:
   // 1. User is authenticated
   // 2. Profile loading is complete (profileLoaded: true)
-  // 3. Profile exists and onboarding is complete
+  // 3. Profile exists (regardless of onboarding status)
   // 4. System is fully initialized
   const isAuthenticated = $state.isAuthenticated;
   const profileLoaded = $state.profileLoaded;
   const profile = $state.profile;
   const isInitialized = $state.isInitialized;
 
-  const result = isAuthenticated && profileLoaded && profile && profile.onboarding_complete;
+  // Show app if authenticated and profile is loaded, regardless of onboarding status
+  const result = isAuthenticated && profileLoaded && !!profile && isInitialized;
 
   // Don't show app until everything is fully initialized
   if (!isInitialized) {
+    console.log('shouldShowApp: false - system not initialized yet');
     return false;
   }
 
-  // Only show app if authenticated, profile loaded, and onboarding complete
+  // Debug logging with more detail
+  if (result) {
+    console.log('✅ shouldShowApp: true - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'hasProfile:', !!profile, 'profile.onboarding_complete:', profile?.onboarding_complete);
+  } else {
+    console.log('❌ shouldShowApp: false - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'hasProfile:', !!profile, 'profile.onboarding_complete:', profile?.onboarding_complete, 'isInitialized:', isInitialized);
+  }
+
+  // Show app if authenticated and profile loaded, regardless of onboarding status
   return result;
 });
 
@@ -980,7 +1205,20 @@ export const shouldShowOnboarding = derived(authStore.getStore(), $state => {
   }
 
   // Show onboarding if authenticated and profile is loaded but onboarding not complete
-  return isAuthenticated && profileLoaded && (!profile || !profile.onboarding_complete);
+  // Only show onboarding if onboarding_complete is explicitly false (not started) or null/undefined (not set)
+  // If it's already true, don't show onboarding
+  const shouldShowOnboardingFlow = !profile || profile.onboarding_complete === false || profile.onboarding_complete === null || profile.onboarding_complete === undefined;
+
+  const result = isAuthenticated && profileLoaded && shouldShowOnboardingFlow;
+
+  // Debug logging
+  if (result) {
+    console.log('shouldShowOnboarding: true - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'shouldShowOnboardingFlow:', shouldShowOnboardingFlow, 'profile.onboarding_complete:', profile?.onboarding_complete);
+  } else {
+    console.log('shouldShowOnboarding: false - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'shouldShowOnboardingFlow:', shouldShowOnboardingFlow, 'profile.onboarding_complete:', profile?.onboarding_complete);
+  }
+
+  return result;
 });
 
 export const shouldShowLogin = derived(authStore.getStore(), $state => {

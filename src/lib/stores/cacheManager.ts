@@ -71,10 +71,13 @@ class CacheManager {
   private async initialize() {
     // Load persisted cache from disk
     await this.loadFromDisk();
-    
+
+    // Validate cache integrity after loading
+    await this.validateCacheIntegrity();
+
     // Start cleanup timer
     this.startCleanupTimer();
-    
+
     // Start persistence timer
     this.startPersistenceTimer();
   }
@@ -300,13 +303,56 @@ class CacheManager {
     }
   }
 
+  // Validate cache integrity and clean up invalid entries
+  private async validateCacheIntegrity(): Promise<void> {
+    const state = get(this.store);
+    const now = Date.now();
+    const entriesToRemove: string[] = [];
+
+    // Check for entries that are expired or have invalid data
+    for (const [key, entry] of state.entries) {
+      // Remove expired entries
+      if (this.isExpired(entry)) {
+        entriesToRemove.push(key);
+        continue;
+      }
+
+      // Remove entries older than 24 hours (force refresh for stale data)
+      const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+      if (now - entry.timestamp > maxAge) {
+        entriesToRemove.push(key);
+        continue;
+      }
+
+      // Validate entry structure
+      if (!entry.data || !entry.timestamp || !entry.ttl || !entry.key) {
+        entriesToRemove.push(key);
+        continue;
+      }
+    }
+
+    // Remove invalid entries
+    if (entriesToRemove.length > 0) {
+      this.store.update(s => {
+        const newEntries = new Map(s.entries);
+        entriesToRemove.forEach(key => newEntries.delete(key));
+        return {
+          ...s,
+          entries: newEntries
+        };
+      });
+
+      console.log(`Cache validation: removed ${entriesToRemove.length} invalid entries`);
+    }
+  }
+
   // Load cache from disk
   private async loadFromDisk(): Promise<void> {
     try {
       const cacheData = await invoke<any>('store_get', { storeId: 'cache_manager' });
       if (cacheData && cacheData.entries) {
         const entries = new Map();
-        
+
         // Convert array back to Map and filter expired entries
         for (const [key, entry] of Object.entries(cacheData.entries)) {
           if (!this.isExpired(entry as CacheEntry)) {
@@ -319,6 +365,8 @@ class CacheManager {
           entries,
           stats: cacheData.stats || s.stats
         }));
+
+        console.log(`Loaded ${entries.size} cache entries from disk`);
       }
     } catch (error) {
       console.warn('Failed to load cache from disk:', error);
@@ -377,6 +425,47 @@ class CacheManager {
         invalidatedCount++;
       }
     });
+
+    console.log(`Invalidated ${invalidatedCount} cache entries after purchase completion`);
+  }
+
+  // Invalidate all user-specific cache entries (useful for logout)
+  invalidateUserCache(userId: string): number {
+    const pattern = new RegExp(`.*${userId}.*`);
+    const invalidatedCount = this.invalidatePattern(pattern);
+    console.log(`Invalidated ${invalidatedCount} user-specific cache entries for user ${userId}`);
+    return invalidatedCount;
+  }
+
+  // Force refresh cache for specific patterns
+  async refreshCacheForPattern(pattern: string | RegExp, maxAge: number = 5 * 60 * 1000): Promise<void> {
+    const state = get(this.store);
+    const now = Date.now();
+    const entriesToRefresh: string[] = [];
+
+    for (const [key, entry] of state.entries) {
+      const matches = typeof pattern === 'string'
+        ? key.includes(pattern)
+        : pattern.test(key);
+
+      if (matches && (now - entry.timestamp) > maxAge) {
+        entriesToRefresh.push(key);
+      }
+    }
+
+    // Remove stale entries to force refresh
+    if (entriesToRefresh.length > 0) {
+      this.store.update(s => {
+        const newEntries = new Map(s.entries);
+        entriesToRefresh.forEach(key => newEntries.delete(key));
+        return {
+          ...s,
+          entries: newEntries
+        };
+      });
+
+      console.log(`Refreshed ${entriesToRefresh.length} stale cache entries matching pattern`);
+    }
   }
 
   // Destroy cache manager

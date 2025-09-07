@@ -1,20 +1,23 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { centralizedAuth } from '../stores/unifiedAuth';
-  import { settingsStore, settingsActions, profileStore } from '../stores/settingsStore';
+  import { settingsStore } from '../stores/settingsStore';
   import { sessionStore } from '../stores/sessionStore';
-  import { cacheManager, cacheStats } from '../stores/cacheManager';
-  import { dataStore, dataActions } from '../stores/dataStore';
+  import { cacheStats } from '../stores/cacheManager';
+  import { dataStore } from '../stores/dataStore';
   import { loadingStore } from '../stores/loadingStore';
   import { iapStore } from '../stores/iapStore';
-  import { invoke } from '@tauri-apps/api/core';
+  import { userStore } from '../stores/userStore';
+  import { purchaseManager, products } from '../stores/purchaseStore';
   import { Badge } from './ui/badge';
 
   let isVisible = false;
   let isDragging = false;
   let position = { x: 20, y: 20 };
   let dragStart = { x: 0, y: 0 };
-  let activeTab = 'auth';
+
+  // Platform logs
+  let platformLogs: Array<{timestamp: Date, level: string, message: string, data?: any}> = [];
 
   // Store states
   let authState: any = {};
@@ -24,13 +27,8 @@
   let dataState: any = {};
   let loadingState: any = {};
   let iapState: any = {};
-  let profileState: any = {};
-
-  // Database data
-  let databaseStatus: any = null;
-  let databaseProfile: any = null;
-  let databasePaymentMethods: any = null;
-  let databaseError: string | null = null;
+  let userState: any = {};
+  let productsState: any = {};
 
   // Subscriptions
   let unsubscribes: (() => void)[] = [];
@@ -38,17 +36,164 @@
   // Detect if we're on mobile
   let isMobile = false;
 
+  // Only enable debugger in development or when explicitly requested
+  let isEnabled = false;
+
+  // Check if debugger should be enabled
+  if (typeof window !== 'undefined') {
+    // Enable in development, or if URL contains debug=1, or if localStorage has debug=true
+    isEnabled = import.meta.env.DEV ||
+                window.location.search.includes('debug=1') ||
+                localStorage.getItem('debug_enabled') === 'true';
+  }
+
+  // Prevent infinite loops - track last logged states
+  let lastLoggedStates: Record<string, string> = {
+    auth: '',
+    settings: '',
+    session: '',
+    cache: '',
+    data: '',
+    loading: '',
+    iap: '',
+    user: '',
+    products: ''
+  };
+
+  // Debounce timers
+  let logTimers: { [key: string]: NodeJS.Timeout } = {};
+
+  // Platform logging function with debouncing
+  function logPlatformEvent(level: string, message: string, data?: any, debounceKey?: string, debounceMs: number = 1000) {
+    // Skip if this is a repeated message for the same debounce key
+    if (debounceKey && lastLoggedStates[debounceKey] === message) {
+      return;
+    }
+
+    // Clear existing timer for this key
+    if (debounceKey && logTimers[debounceKey]) {
+      clearTimeout(logTimers[debounceKey]);
+    }
+
+    // Set new timer
+    if (debounceKey) {
+      logTimers[debounceKey] = setTimeout(() => {
+        // Update last logged state
+        if (debounceKey) {
+          lastLoggedStates[debounceKey] = message;
+        }
+
+        // Add log entry
+        platformLogs = [...platformLogs.slice(-49), { // Keep last 50 logs to reduce memory
+          timestamp: new Date(),
+          level,
+          message,
+          data
+        }];
+
+        // Clean up timer
+        if (debounceKey) {
+          delete logTimers[debounceKey];
+        }
+      }, debounceMs);
+    } else {
+      // Immediate logging for non-debounced messages
+      platformLogs = [...platformLogs.slice(-49), {
+        timestamp: new Date(),
+        level,
+        message,
+        data
+      }];
+    }
+  }
+
+  // Enhanced logging for auth debugging
+  function logAuthState(level: string, message: string, state: any) {
+    const authInfo = {
+      isAuthenticated: state.isAuthenticated,
+      isInitialized: state.isInitialized,
+      hasUser: !!state.user,
+      hasSession: !!state.session,
+      hasProfile: !!state.profile,
+      profileLoaded: state.profileLoaded,
+      onboardingCompleted: state.onboardingCompleted,
+      currentOnboardingStep: state.currentOnboardingStep
+    };
+
+    // Log critical auth changes immediately, others with debounce
+    const isCriticalChange = !state.isAuthenticated ||
+                            state.onboardingCompleted ||
+                            (state.currentOnboardingStep === 4);
+
+    if (isCriticalChange) {
+      logPlatformEvent(level, message, authInfo); // Immediate logging
+    } else {
+      logPlatformEvent(level, message, authInfo, 'auth_debug', 500); // Debounced
+    }
+  }
+
+  // Make log function available globally (with fallback when disabled)
+  if (typeof window !== 'undefined') {
+    if (isEnabled) {
+      (window as any).logPlatformEvent = logPlatformEvent;
+    } else {
+      // Provide no-op function when debugger is disabled to prevent errors
+      (window as any).logPlatformEvent = (level: string, message: string, data?: any) => {
+        // Only log critical errors to console when debugger is disabled
+        if (level === 'error') {
+          console.error(`[Platform] ${message}`, data);
+        }
+      };
+    }
+  }
+
   onMount(() => {
-    // Subscribe to all stores
+    // Only set up subscriptions if debugger is enabled to prevent performance issues
+    if (!isEnabled) {
+      console.log('FloatingDebugger: Disabled - not subscribing to stores');
+      return;
+    }
+
+    console.log('FloatingDebugger: Enabled - setting up store subscriptions');
+
+    // Subscribe to all stores with debounced logging to prevent infinite loops
     unsubscribes = [
-      centralizedAuth.subscribe(state => authState = state),
-      settingsStore.subscribe(state => settingsState = state),
-      sessionStore.subscribe(state => sessionState = state),
-      cacheStats.subscribe(state => cacheState = state),
-      dataStore.subscribe(state => dataState = state),
-      loadingStore.subscribe(state => loadingState = state),
-      iapStore.subscribe(state => iapState = state),
-      profileStore.subscribe(state => profileState = state)
+      centralizedAuth.subscribe(state => {
+        authState = state;
+        logAuthState('info', 'Auth state updated', state);
+      }),
+      settingsStore.subscribe(state => {
+        settingsState = state;
+        logPlatformEvent('info', `Settings state updated: ${state.isInitialized ? 'initialized' : 'not initialized'}`, undefined, 'settings');
+      }),
+      sessionStore.subscribe(state => {
+        sessionState = state;
+        logPlatformEvent('info', `Session state updated: ${state.isAuthenticated ? 'authenticated' : 'not authenticated'}`, undefined, 'session');
+      }),
+      cacheStats.subscribe(state => {
+        cacheState = state;
+        logPlatformEvent('info', `Cache state updated: ${state.size} items`, undefined, 'cache');
+      }),
+      dataStore.subscribe(state => {
+        dataState = state;
+        logPlatformEvent('info', `Data store state updated: ${state.isInitialized ? 'initialized' : 'not initialized'}`, undefined, 'data');
+      }),
+      loadingStore.subscribe(state => {
+        loadingState = state;
+        logPlatformEvent('info', `Loading state updated: ${state.isLoading ? 'loading' : 'idle'}`, undefined, 'loading');
+      }),
+      iapStore.subscribe(state => {
+        iapState = state;
+        logPlatformEvent('info', `IAP state updated: ${state.isInitialized ? 'initialized' : 'not initialized'}`, undefined, 'iap');
+      }),
+      userStore.subscribe(state => {
+        userState = state;
+        logPlatformEvent('info', `User state updated: ${state.userId ? 'has user' : 'no user'}`, undefined, 'user');
+      }),
+      products.subscribe(state => {
+        productsState = state;
+        logPlatformEvent('info', `Products state updated: ${state.length} products`, undefined, 'products');
+      })
     ];
 
     // Check if we're on mobile
@@ -85,7 +230,12 @@
   });
 
   onDestroy(() => {
+    // Clean up store subscriptions
     unsubscribes.forEach(unsub => unsub());
+
+    // Clean up debounce timers
+    Object.values(logTimers).forEach(timer => clearTimeout(timer));
+    logTimers = {};
   });
 
   function toggleDebugger() {
@@ -95,11 +245,11 @@
   function startDrag(e: MouseEvent | TouchEvent) {
     // Don't allow dragging on mobile (fullscreen mode)
     if (isMobile) return;
-    
+
     isDragging = true;
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    
+
     dragStart = {
       x: clientX - position.x,
       y: clientY - position.y
@@ -108,15 +258,15 @@
 
   function handleDrag(e: MouseEvent | TouchEvent) {
     if (!isDragging || isMobile) return;
-    
+
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    
+
     position = {
       x: clientX - dragStart.x,
       y: clientY - dragStart.y
     };
-    
+
     // Save position to localStorage (only on desktop)
     if (!isMobile) {
       localStorage.setItem('debugger-position', JSON.stringify(position));
@@ -127,120 +277,8 @@
     isDragging = false;
   }
 
-  async function checkDatabaseStatus() {
-    try {
-      databaseError = null;
-      databaseStatus = await invoke('get_database_status');
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Database check failed';
-      databaseStatus = null;
-    }
-  }
-
-  async function loadDatabaseProfile() {
-    try {
-      databaseError = null;
-      const userId = authState.user?.id;
-      if (!userId) {
-        databaseError = 'No authenticated user';
-        return;
-      }
-      databaseProfile = await invoke('get_user_profile', { userId });
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Profile load failed';
-      databaseProfile = null;
-    }
-  }
-
-  async function loadDatabasePaymentMethods() {
-    try {
-      databaseError = null;
-      const userId = authState.user?.id;
-      if (!userId) {
-        databaseError = 'No authenticated user';
-        return;
-      }
-      // Payment methods functionality removed - no longer in database schema
-      databaseError = 'Payment methods functionality removed from database schema';
-      databasePaymentMethods = null;
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Payment methods load failed';
-      databasePaymentMethods = null;
-    }
-  }
-
-  async function clearCache() {
-    try {
-      cacheManager.clear();
-      databaseError = null;
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Cache clear failed';
-    }
-  }
-
-  async function reinitializeAuth() {
-    try {
-      databaseError = null;
-      await centralizedAuth.reinitialize();
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Auth reinitialize failed';
-    }
-  }
-
-  async function refreshProfile() {
-    try {
-      databaseError = null;
-      const userId = authState.user?.id;
-      if (!userId) {
-        databaseError = 'No authenticated user';
-        return;
-      }
-      
-      await settingsActions.loadProfile(true);
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Profile refresh failed';
-      console.error('❌ Profile refresh failed:', error);
-    }
-  }
-
-  async function testDataStore() {
-    try {
-      databaseError = null;
-      const userId = authState.user?.id;
-      if (!userId) {
-        databaseError = 'No authenticated user';
-        return;
-      }
-      
-      const profile = await dataActions.getUserProfile(userId);
-      databaseProfile = { dataStoreResult: profile }; // Show in UI
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Data store test failed';
-      console.error('❌ Data store test failed:', error);
-    }
-  }
-
-  async function debugDatabaseSchema() {
-    try {
-      databaseError = null;
-      const result = await invoke('get_database_status');
-      databaseProfile = { statusCheck: result }; // Show in UI
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Database status check failed';
-      console.error('❌ Database status check failed:', error);
-    }
-  }
-
-  async function initializeStores() {
-    try {
-      databaseError = null;
-      await dataActions.initialize();
-      await settingsActions.initialize();
-      databaseProfile = { storeInit: 'completed' }; // Show in UI
-    } catch (error) {
-      databaseError = error instanceof Error ? error.message : 'Store initialization failed';
-      console.error('❌ Store initialization failed:', error);
-    }
+  function clearLogs() {
+    platformLogs = [];
   }
 
   function formatJson(obj: any) {
@@ -249,8 +287,8 @@
   }
 
   function getStatusColor(status: any) {
-    if (status === true || status === 'complete' || status === 'active') return 'bg-green-500';
-    if (status === false || status === 'error' || status === 'failed') return 'bg-red-500';
+    if (status === true || status === 'complete' || status === 'active' || status === 'initialized') return 'bg-green-500';
+    if (status === false || status === 'error' || status === 'failed' || status === 'not initialized') return 'bg-red-500';
     if (status === 'pending' || status === 'running' || status === 'loading') return 'bg-yellow-500';
     return 'bg-gray-500';
   }
@@ -263,21 +301,23 @@
   on:touchend={stopDrag}
 />
 
-<!-- Debug Toggle Button (always visible) -->
-<button
-  class="fixed top-4 right-4 z-[9999] bg-purple-600 hover:bg-purple-700 text-white rounded-full w-10 h-10 flex items-center justify-center font-mono text-sm shadow-lg"
-  on:click={toggleDebugger}
-  title="Toggle Debugger (Ctrl+Shift+D)"
->
-  🐛
-</button>
+{#if isEnabled}
+  <!-- Debug Toggle Button (only visible when debugger is enabled) -->
+  <button
+    class="fixed top-4 right-4 z-[9999] bg-purple-600 hover:bg-purple-700 text-white rounded-full w-10 h-10 flex items-center justify-center font-mono text-sm shadow-lg"
+    on:click={toggleDebugger}
+    title="Toggle Debugger (Ctrl+Shift+D)"
+  >
+    🐛
+  </button>
+{/if}
 
-{#if isVisible}
+{#if isEnabled && isVisible}
   <!-- Floating Debugger Window -->
   <div
     class="fixed z-[9998] bg-white dark:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg shadow-2xl overflow-hidden
-           max-w-2xl max-h-[80vh] 
-           sm:min-w-[500px]
+           max-w-3xl max-h-[80vh]
+           sm:min-w-[600px]
            max-sm:left-2 max-sm:right-2 max-sm:top-16 max-sm:bottom-16 max-sm:w-auto max-sm:h-auto max-sm:max-h-none"
     style="{!isMobile ? `left: ${position.x}px; top: ${position.y}px;` : ''}"
   >
@@ -290,7 +330,7 @@
       on:touchstart={startDrag}
       on:keydown={(e) => e.key === 'Enter' && e.preventDefault()}
     >
-      <h3 class="font-semibold">🐛 Store Debugger</h3>
+      <h3 class="font-semibold">🐛 Platform Status</h3>
       <div class="flex items-center gap-2">
         <span class="text-xs opacity-75">Ctrl+Shift+D</span>
         <button
@@ -302,219 +342,97 @@
       </div>
     </div>
 
-    <!-- Tab Navigation -->
-    <div class="flex border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
-      {#each [
-        { id: 'auth', label: 'Auth', color: getStatusColor(authState.isAuthenticated) },
-        { id: 'profile', label: 'Profile', color: getStatusColor(profileState.profile) },
-        { id: 'stores', label: 'Stores', color: getStatusColor(settingsState.isInitialized) },
-        { id: 'cache', label: 'Cache', color: getStatusColor(cacheState.size > 0) },
-        { id: 'database', label: 'Database', color: 'bg-blue-500' }
-      ] as tab}
-        <button
-          class="px-4 py-2 text-sm font-medium border-b-2 transition-colors flex items-center gap-2
-            {activeTab === tab.id 
-              ? 'border-purple-500 text-purple-600 dark:text-purple-400' 
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
-          on:click={() => activeTab = tab.id}
-        >
-          <div class="w-2 h-2 rounded-full {tab.color}"></div>
-          {tab.label}
-        </button>
-      {/each}
+    <!-- Status Badges -->
+    <div class="p-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800">
+      <h4 class="font-semibold text-sm mb-3">Platform Initialization Status</h4>
+      <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+        <Badge variant="outline" class="text-xs">
+          Debugger: {isEnabled ? 'Enabled' : 'Disabled'}
+        </Badge>
+        <Badge variant={authState.isAuthenticated ? 'default' : 'secondary'} class="text-xs">
+          Auth: {authState.isAuthenticated ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={settingsState.isInitialized ? 'default' : 'secondary'} class="text-xs">
+          Settings: {settingsState.isInitialized ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={dataState.isInitialized ? 'default' : 'secondary'} class="text-xs">
+          Data: {dataState.isInitialized ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={sessionState.isAuthenticated ? 'default' : 'secondary'} class="text-xs">
+          Session: {sessionState.isAuthenticated ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={iapState.isInitialized ? 'default' : 'secondary'} class="text-xs">
+          IAP: {iapState.isInitialized ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={userState.userId ? 'default' : 'secondary'} class="text-xs">
+          User: {userState.userId ? '✓' : '✗'}
+        </Badge>
+        <Badge variant={productsState.length > 0 ? 'default' : 'secondary'} class="text-xs">
+          Products: {productsState.length}
+        </Badge>
+        <Badge variant={loadingState.isLoading ? 'secondary' : 'default'} class="text-xs">
+          Loading: {loadingState.isLoading ? '...' : 'Idle'}
+        </Badge>
+        <Badge variant={cacheState.size > 0 ? 'default' : 'secondary'} class="text-xs">
+          Cache: {cacheState.size}
+        </Badge>
+      </div>
     </div>
 
-    <!-- Content -->
-    <div class="p-4 overflow-auto max-h-96 max-sm:max-h-[calc(100vh-12rem)]">
-      {#if activeTab === 'auth'}
-        <div class="space-y-3">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-4">
-            <Badge variant={authState.isAuthenticated ? 'default' : 'secondary'}>
-              Authenticated: {authState.isAuthenticated}
-            </Badge>
-            <Badge variant={authState.isInitialized ? 'default' : 'secondary'}>
-              Initialized: {authState.isInitialized}
-            </Badge>
-          </div>
-          
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">User:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-32">
-{formatJson(authState.user ? { id: authState.user.id, email: authState.user.email } : null)}
-            </pre>
-          </div>
+    <!-- Platform Logs -->
+    <div class="p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h4 class="font-semibold text-sm">Platform Logs</h4>
+        <button
+          class="px-2 py-1 text-xs bg-red-100 text-red-800 rounded hover:bg-red-200"
+          on:click={clearLogs}
+        >
+          Clear Logs
+        </button>
+      </div>
 
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Profile:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-32">
-{formatJson(authState.profile)}
-            </pre>
+      <div class="max-h-80 overflow-y-auto border rounded p-2 bg-gray-50 dark:bg-gray-800">
+        {#each platformLogs.slice().reverse() as log}
+          <div class="text-xs border-l-2 pl-2 mb-2 last:mb-0
+            {log.level === 'error' ? 'border-red-500' :
+             log.level === 'warn' ? 'border-yellow-500' :
+             log.level === 'info' ? 'border-blue-500' : 'border-gray-500'}">
+            <div class="flex justify-between items-start mb-1">
+              <span class="font-medium text-muted-foreground">{log.timestamp.toLocaleTimeString()}</span>
+              <span class={`px-1 py-0.5 text-xs rounded ${
+                log.level === 'error' ? 'bg-red-100 text-red-800' :
+                log.level === 'warn' ? 'bg-yellow-100 text-yellow-800' :
+                log.level === 'info' ? 'bg-blue-100 text-blue-800' :
+                'bg-gray-100 text-gray-800'
+              }`}>
+                {log.level}
+              </span>
+            </div>
+            <div class="mb-1">{log.message}</div>
+            {#if log.data}
+              <details class="text-xs">
+                <summary class="cursor-pointer text-muted-foreground hover:text-foreground">Show data</summary>
+                <pre class="text-xs bg-gray-100 dark:bg-gray-700 p-1 rounded mt-1 overflow-x-auto">{JSON.stringify(log.data, null, 2)}</pre>
+              </details>
+            {/if}
           </div>
-
-          <div class="flex gap-2">
-            <button class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600" on:click={reinitializeAuth}>Reinitialize Auth</button>
-          </div>
-        </div>
-
-      {:else if activeTab === 'profile'}
-        <div class="space-y-3">
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <Badge variant={profileState.profile ? 'default' : 'secondary'}>
-              Has Profile: {!!profileState.profile}
-            </Badge>
-            <Badge variant={profileState.loading ? 'secondary' : 'default'}>
-              Loading: {profileState.loading}
-            </Badge>
-            <Badge variant={profileState.error ? 'destructive' : 'default'}>
-              Status: {profileState.error ? 'Error' : 'OK'}
-            </Badge>
-          </div>
-          
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Profile Data:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson(profileState.profile)}
-            </pre>
-          </div>
-
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">IAP State:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson({
-  isInitialized: iapState.isInitialized,
-  canMakePayments: iapState.canMakePayments,
-  products: iapState.products?.length || 0,
-  purchases: iapState.purchases?.length || 0,
-  error: iapState.error
-})}
-            </pre>
-          </div>
-
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <button class="px-3 py-2 text-sm bg-purple-500 text-white rounded hover:bg-purple-600" on:click={refreshProfile}>Refresh Profile</button>
-            <button class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600" on:click={() => settingsActions.initialize()}>Init Settings</button>
-            <button class="px-3 py-2 text-sm bg-green-500 text-white rounded hover:bg-green-600" on:click={testDataStore}>Test Data Store</button>
-            <button class="px-3 py-2 text-sm bg-orange-500 text-white rounded hover:bg-orange-600" on:click={debugDatabaseSchema}>Check Status</button>
-            <button class="px-3 py-2 text-sm bg-teal-500 text-white rounded hover:bg-teal-600" on:click={initializeStores}>Init Stores</button>
-          </div>
-        </div>
-
-      {:else if activeTab === 'stores'}
-        <div class="space-y-3">
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <Badge variant={settingsState.isInitialized ? 'default' : 'secondary'}>
-              Settings: {settingsState.isInitialized}
-            </Badge>
-            <Badge variant={dataState.isInitialized ? 'default' : 'secondary'}>
-              Data: {dataState.isInitialized}
-            </Badge>
-            <Badge variant={sessionState.isAuthenticated ? 'default' : 'secondary'}>
-              Session: {sessionState.isAuthenticated}
-            </Badge>
-          </div>
-
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Settings Store:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson({
-  profile: !!settingsState.profile,
-  profileLoading: settingsState.profileLoading,
-  profileError: settingsState.profileError,
-  isInitialized: settingsState.isInitialized
-})}
-            </pre>
-          </div>
-
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Data Store:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson({
-  isInitialized: dataState.isInitialized,
-  isLoading: dataState.isLoading,
-  error: dataState.error,
-  lastSync: dataState.lastSync
-})}
-            </pre>
-          </div>
-
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Loading State:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson({
-  isLoading: loadingState.isLoading,
-  message: loadingState.message,
-  type: loadingState.type,
-  progress: loadingState.progress
-})}
-            </pre>
-          </div>
-        </div>
-
-      {:else if activeTab === 'cache'}
-        <div class="space-y-3">
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <Badge>Size: {cacheState.size || 0}</Badge>
-            <Badge>Hits: {cacheState.hits || 0}</Badge>
-            <Badge>Misses: {cacheState.misses || 0}</Badge>
-          </div>
-
-          <div class="space-y-2">
-            <h4 class="font-semibold text-sm">Cache Stats:</h4>
-            <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson({
-  ...cacheState,
-  hitRate: `${((cacheState.hitRate || 0) * 100).toFixed(1)}%`
-})}
-            </pre>
-          </div>
-
-          <div class="flex gap-2">
-            <button class="px-3 py-2 text-sm bg-red-500 text-white rounded hover:bg-red-600" on:click={clearCache}>Clear Cache</button>
-          </div>
-        </div>
-
-      {:else if activeTab === 'database'}
-        <div class="space-y-3">
-          <div class="flex flex-col sm:flex-row gap-2">
-            <button class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600" on:click={checkDatabaseStatus}>Check DB Status</button>
-            <button class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600" on:click={loadDatabaseProfile}>Load Profile</button>
-            <button class="px-3 py-2 text-sm bg-blue-500 text-white rounded hover:bg-blue-600" on:click={loadDatabasePaymentMethods}>Load Payment Methods</button>
-          </div>
-
-          {#if databaseError}
-            <div class="p-2 bg-red-100 dark:bg-red-900 border border-red-300 dark:border-red-700 rounded text-sm text-red-700 dark:text-red-300">
-              {databaseError}
+        {/each}
+        {#if platformLogs.length === 0}
+          {#if !isEnabled}
+            <div class="text-xs text-muted-foreground text-center py-8">
+              <div class="mb-2">🐛 Floating Debugger is currently disabled</div>
+              <div class="text-xs">
+                To enable: Add <code class="bg-gray-100 px-1 rounded">?debug=1</code> to URL,<br>
+                or set <code class="bg-gray-100 px-1 rounded">localStorage.setItem('debug_enabled', 'true')</code>
+              </div>
+            </div>
+          {:else}
+            <div class="text-xs text-muted-foreground text-center py-8">
+              No platform logs yet. Logs will appear here as the platform initializes and operates.
             </div>
           {/if}
-
-          {#if databaseStatus}
-            <div class="space-y-2">
-              <h4 class="font-semibold text-sm">Database Status:</h4>
-              <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson(databaseStatus)}
-              </pre>
-            </div>
-          {/if}
-
-          {#if databaseProfile}
-            <div class="space-y-2">
-              <h4 class="font-semibold text-sm">Database Profile:</h4>
-              <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson(databaseProfile)}
-              </pre>
-            </div>
-          {/if}
-
-          {#if databasePaymentMethods}
-            <div class="space-y-2">
-              <h4 class="font-semibold text-sm">Database Payment Methods:</h4>
-              <pre class="text-xs bg-gray-100 dark:bg-gray-800 p-2 rounded overflow-auto max-h-24">
-{formatJson(databasePaymentMethods)}
-              </pre>
-            </div>
-          {/if}
-        </div>
-      {/if}
+        {/if}
+      </div>
     </div>
   </div>
 {/if}

@@ -255,6 +255,9 @@ function createIAPStore() {
         lastInitialized: now
       }));
 
+      // Setup visibility change handler for purchase state management
+      handleVisibilityChange();
+
       console.log('🎉 IAP initialization completed successfully');
       return true;
 
@@ -669,6 +672,60 @@ function createIAPStore() {
       lastPurchasesRestore: null,
       cacheValidDuration: 5 * 60 * 1000
     }));
+
+    // Clear processed purchases tracking on reset
+    processedPurchases.clear();
+  }
+
+  // Handle app visibility changes to clear stale states
+  function handleVisibilityChange(): void {
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+          // App came to foreground - clear any stale purchase loading states
+          console.log('📱 App came to foreground, clearing stale purchase states');
+          update(state => {
+            const now = Date.now();
+            const staleThreshold = 5 * 60 * 1000; // 5 minutes
+
+            // Clear purchase loading states that are older than threshold
+            const newPurchaseLoading: { [productId: string]: boolean } = {};
+            Object.entries(state.purchaseLoading).forEach(([productId, isLoading]) => {
+              if (isLoading) {
+                // For now, clear all loading states on foreground to be safe
+                console.log(`Clearing stale loading state for ${productId}`);
+              }
+            });
+
+            return {
+              ...state,
+              purchaseLoading: {},
+              purchaseErrors: {} // Also clear any stale errors
+            };
+          });
+
+          // Also ensure user balance is synced when app comes to foreground
+          // This handles cases where purchases might have been processed in background
+          setTimeout(async () => {
+            try {
+              const { userStore } = await import('$lib/stores/userStore');
+              let currentState: any = null;
+              const unsubscribe = userStore.subscribe((state) => {
+                currentState = state;
+              });
+              unsubscribe();
+
+              if (currentState?.isInitialized && currentState?.userId) {
+                console.log('🔄 Syncing balance after app foreground');
+                await userStore.refreshTokenBalance(true);
+              }
+            } catch (error) {
+              console.warn('⚠️ Failed to sync balance on IAP store foreground:', error);
+            }
+          }, 1500); // Delay to allow other initialization to complete
+        }
+      });
+    }
   }
 
   async function openSubscriptionSettings(productId: string): Promise<void> {
@@ -741,12 +798,43 @@ function createIAPStore() {
   }
 
   let purchaseListener: (() => void) | null = null;
+  // Track recently processed purchases to prevent duplicate processing
+  const processedPurchases = new Set<string>();
 
   function setupPurchaseListener(): void {
     if (typeof onPurchaseUpdated === 'function' && !purchaseListener) {
       console.log('🎧 Setting up purchase listener...');
+
+      // Debug: Log current IAP product configuration
+      console.log('📦 IAP Product Configuration:');
+      console.log('  Consumables:', iapProductIds.consumables);
+      console.log('  Subscriptions:', iapProductIds.subscriptions);
+
       purchaseListener = onPurchaseUpdated(async (purchase: any) => {
-        console.log('🔥 Purchase listener triggered with purchase:', purchase);
+        console.log('🔥 IAP Purchase listener triggered with purchase:', {
+          productId: purchase.productId,
+          purchaseToken: purchase.purchaseToken,
+          purchaseState: purchase.purchaseState,
+          orderId: purchase.orderId
+        });
+
+        // Log IAP listener trigger
+        if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+          (window as any).logPlatformEvent('info', `IAP listener triggered for ${purchase.productId}`, {
+            productId: purchase.productId,
+            purchaseState: purchase.purchaseState,
+            purchaseToken: purchase.purchaseToken?.substring(0, 10) + '...'
+          });
+        }
+
+        // Create a unique identifier for this purchase to prevent duplicate processing
+        const purchaseKey = `${purchase.purchaseToken}_${purchase.productId}_${purchase.purchaseState}`;
+
+        // Check if we've already processed this purchase in this session
+        if (processedPurchases.has(purchaseKey)) {
+          console.log('⚠️ Purchase already processed in this session, skipping:', purchaseKey);
+          return;
+        }
 
         const transaction: Transaction = {
           transactionId: purchase.purchaseToken || purchase.orderId || 'unknown',
@@ -778,6 +866,38 @@ function createIAPStore() {
               const productType = iapProductIds.consumables.includes(purchase.productId) ? 'consumable' : 'subscription';
 
               console.log('🔥 Processing purchase for user:', userId, 'product:', purchase.productId, 'type:', productType);
+              console.log('📦 Available consumables:', iapProductIds.consumables);
+              console.log('📦 Available subscriptions:', iapProductIds.subscriptions);
+              console.log('🔍 Is product consumable?', iapProductIds.consumables.includes(purchase.productId));
+
+              // Check if this transaction has already been processed to prevent double charging
+              // But be less aggressive about this check to avoid blocking legitimate purchases
+              let shouldProcess = true;
+
+              try {
+                const { checkTransactionExists } = await import('$lib/utils/iapDatabase');
+                const transactionExists = await checkTransactionExists(
+                  userId,
+                  transaction.transactionId,
+                  purchase.purchaseToken
+                );
+
+                if (transactionExists) {
+                  console.log('⚠️ Transaction already exists in database, this might be a duplicate IAP event');
+                  // Don't return here - we still want to update the balance if needed
+                  // Just mark that we've seen this transaction before
+                }
+              } catch (checkError) {
+                console.warn('⚠️ Could not check transaction existence:', checkError);
+                // Continue processing - better to risk duplicate than miss a purchase
+              }
+
+              if (!shouldProcess) {
+                console.log('⏭️ Skipping purchase processing due to duplicate detection');
+                return;
+              }
+
+              console.log('🔄 Processing purchase transaction...');
 
               // Import database functions
               const { processSuccessfulPurchase } = await import('$lib/utils/iapDatabase');
@@ -785,12 +905,81 @@ function createIAPStore() {
               // Process the purchase through our database system
               await processSuccessfulPurchase(userId, purchase, transaction, productType);
 
-              console.log('✅ Purchase processed successfully in database - user should see token increase');
+              console.log('✅ Purchase processed successfully in database');
+
+              // Mark this purchase as processed to prevent future duplicates
+              processedPurchases.add(purchaseKey);
+
+              // Clean up old processed purchases (keep last 100)
+              if (processedPurchases.size > 100) {
+                const oldestKey = processedPurchases.values().next().value;
+                processedPurchases.delete(oldestKey);
+              }
+
+              console.log('🔄 Updating user store balance after IAP purchase processing');
+
+              // Update the user store balance for ALL purchases to ensure it's always in sync
+              try {
+                const { userStore } = await import('$lib/stores/userStore');
+
+                // Log IAP balance update
+                if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+                  (window as any).logPlatformEvent('info', `IAP processing balance update for ${purchase.productId}`, {
+                    productId: purchase.productId,
+                    purchaseToken: purchase.purchaseToken,
+                    purchaseState: purchase.purchaseState
+                  });
+                }
+
+                // Check if balance was recently updated (within last 5 seconds) to avoid double updates
+                const { get } = await import('svelte/store');
+                const currentState = get(userStore);
+                const lastUpdate = currentState.lastTokenUpdate || 0;
+                const timeSinceLastUpdate = Date.now() - lastUpdate;
+
+                if (timeSinceLastUpdate > 5000) {
+                  // Balance wasn't updated recently, so refresh it
+                  const balanceBefore = await userStore.refreshTokenBalance(true);
+                  console.log('✅ User store balance updated after IAP purchase');
+
+                  // Log successful balance update
+                  if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+                    (window as any).logPlatformEvent('info', `Balance updated after IAP processing for ${purchase.productId}`, {
+                      productId: purchase.productId,
+                      balanceUpdated: true
+                    });
+                  }
+                } else {
+                  console.log('⏭️ Balance was recently updated, skipping IAP balance refresh to avoid double update');
+                  if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+                    (window as any).logPlatformEvent('info', `Balance recently updated, skipping IAP refresh for ${purchase.productId}`, {
+                      productId: purchase.productId,
+                      timeSinceLastUpdate
+                    });
+                  }
+                }
+
+                // Also refresh the purchase store to clear any loading states
+                const { purchaseManager } = await import('$lib/stores/purchaseStore');
+                purchaseManager.clearAllPurchaseErrors();
+
+              } catch (balanceError) {
+                console.error('❌ Failed to update user store balance:', balanceError);
+
+                // Log balance update failure
+                if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
+                  (window as any).logPlatformEvent('error', `IAP balance update failed for ${purchase.productId}`, {
+                    productId: purchase.productId,
+                    error: balanceError
+                  });
+                }
+              }
             } else {
               console.error('❌ No authenticated user found for purchase processing');
             }
           } catch (error) {
             console.error('❌ Failed to process purchase in database:', error);
+            // Don't re-throw - we don't want to crash the app on purchase processing errors
           }
         } else {
           console.log('⚠️ Purchase failed or cancelled, state:', purchase.purchaseState);

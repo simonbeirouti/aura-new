@@ -1,4 +1,5 @@
 import { createEnhancedStore, storeManager, type BaseStore } from './core/storeManager';
+import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import type { User, AuthSession } from '@supabase/supabase-js';
 
@@ -183,20 +184,25 @@ class SessionStore {
   // Token management with Tauri secure storage
   private async storeTokensSecurely(accessToken: string, refreshToken: string) {
     try {
+      console.log('SessionStore: Storing tokens securely');
       await invoke('store_tokens', {
         tokens: {
           accessToken,
           refreshToken
         }
       });
+      console.log('SessionStore: Tokens stored successfully');
 
       // Also initialize database configuration for IAP functions
+      console.log('SessionStore: Initializing database with tokens');
       await invoke('init_database', {
         databaseUrl: import.meta.env.VITE_SUPABASE_URL,
         accessToken,
         anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY
       });
+      console.log('SessionStore: Database initialized successfully');
     } catch (error) {
+      console.error('SessionStore: Error storing tokens or initializing database:', error);
       throw error;
     }
   }
@@ -211,24 +217,50 @@ class SessionStore {
 
   async getStoredTokens(): Promise<{ accessToken: string; refreshToken: string } | null> {
     try {
+      console.log('SessionStore: Retrieving stored tokens');
       const tokens = await invoke<{ access_token: string; refresh_token: string }>('get_tokens');
+      console.log('SessionStore: Tokens retrieved successfully');
       return {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token
       };
     } catch (error) {
-      console.warn('No stored tokens found:', error);
+      console.warn('SessionStore: No stored tokens found:', error);
       return null;
     }
   }
 
   async hasValidSession(): Promise<boolean> {
     try {
-      return await invoke<boolean>('check_session');
+      // First check with backend
+      const backendValid = await invoke<boolean>('check_session');
+
+      if (backendValid) {
+        // Also validate token expiry if we have it
+        const state = get(this.store);
+        if (state.tokenExpiresAt) {
+          const now = Date.now();
+          const expiryBuffer = 5 * 60 * 1000; // 5 minutes buffer
+          return state.tokenExpiresAt > (now + expiryBuffer);
+        }
+        return true;
+      }
+
+      return false;
     } catch (error) {
       console.warn('Session check failed:', error);
       return false;
     }
+  }
+
+  // Check if tokens need refresh (within 10 minutes of expiry)
+  isTokenRefreshNeeded(): boolean {
+    const state = get(this.store);
+    if (!state.tokenExpiresAt) return false;
+
+    const now = Date.now();
+    const refreshThreshold = 10 * 60 * 1000; // 10 minutes before expiry
+    return state.tokenExpiresAt - now < refreshThreshold;
   }
 
   // Token refresh management
@@ -246,15 +278,13 @@ class SessionStore {
     }
 
     // Get current state to check token expiration
-    let currentState: SessionState;
-    const unsubscribe = this.store.subscribe(state => { currentState = state; });
-    unsubscribe();
+    const currentState = get(this.store);
 
-    if (!currentState!.tokenExpiresAt) return;
+    if (!currentState.tokenExpiresAt) return;
 
     // Schedule refresh 5 minutes before expiration
-    const refreshTime = currentState!.tokenExpiresAt - Date.now() - (5 * 60 * 1000);
-    
+    const refreshTime = currentState.tokenExpiresAt - Date.now() - (5 * 60 * 1000);
+
     if (refreshTime > 0) {
       this.refreshTimer = setTimeout(async () => {
         await this.refreshTokens();

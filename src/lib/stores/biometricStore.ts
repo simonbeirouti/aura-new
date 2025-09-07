@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { centralizedAuth } from './unifiedAuth';
 
@@ -41,47 +41,68 @@ const biometricStore = writable<BiometricState>(initialState);
 
 // Helper to check if user is authenticated
 function isUserAuthenticated(): boolean {
-  let authenticated = false;
-  const unsubscribe = centralizedAuth.subscribe(auth => {
-    authenticated = auth.isAuthenticated;
-  });
-  unsubscribe();
-  return authenticated;
+  const authState = get(centralizedAuth);
+  return authState.isAuthenticated;
 }
 
 // Biometric store actions
 export const biometricActions = {
-  // Initialize biometric store
-  async initialize(): Promise<void> {
+  // Initialize biometric store with enhanced error handling
+  async initialize(forceRefresh = false): Promise<void> {
     if (!isUserAuthenticated()) {
       console.warn('Cannot initialize biometric: User not authenticated');
+      return;
+    }
+
+    // Check if already initialized and recent (within last 30 minutes)
+    const currentState = get(biometricStore);
+    const now = Date.now();
+    const thirtyMinutes = 30 * 60 * 1000;
+
+    if (!forceRefresh && currentState.isInitialized && currentState.lastAuthenticated &&
+        (now - currentState.lastAuthenticated) < thirtyMinutes) {
+      console.log('Biometric already initialized recently, skipping');
       return;
     }
 
     biometricStore.update(s => ({ ...s, loading: true, error: null }));
 
     try {
-      // Load settings and check availability in parallel
-      const [settings, status] = await Promise.all([
+      // Load settings and check availability in parallel with timeout
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Biometric initialization timeout')), 10000)
+      );
+
+      const initPromise = Promise.all([
         this.loadSettings(),
         this.checkAvailability()
       ]);
+
+      const [settings, status] = await Promise.race([initPromise, timeoutPromise]);
 
       biometricStore.update(s => ({
         ...s,
         settings,
         status,
         loading: false,
-        isInitialized: true
+        isInitialized: true,
+        error: null
       }));
+
+      console.log('Biometric store initialized successfully');
+
     } catch (error) {
       console.error('Failed to initialize biometric store:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to initialize biometric';
+
       biometricStore.update(s => ({
         ...s,
         loading: false,
-        error: error instanceof Error ? error.message : 'Failed to initialize biometric',
-        isInitialized: true
+        error: errorMessage,
+        isInitialized: true // Mark as initialized even on failure to prevent infinite retries
       }));
+
+      // Don't throw error - biometric is not critical for app functionality
     }
   },
 

@@ -312,6 +312,7 @@ const ongoingSyncs = new Set<string>();
 
 /**
  * Check if a transaction already exists in the database
+ * This is critical for preventing double charging
  */
 export async function checkTransactionExists(
   userId: string,
@@ -319,15 +320,22 @@ export async function checkTransactionExists(
   purchaseToken: string
 ): Promise<boolean> {
   try {
+    console.log(`🔍 Checking if transaction exists: user=${userId}, transaction=${transactionId}, token=${purchaseToken}`);
+
     const result = await invoke<boolean>('check_transaction_exists', {
       userId,
       transactionId,
       purchaseToken
     });
+
+    console.log(`📊 Transaction existence check result: ${result ? 'EXISTS' : 'DOES NOT EXIST'}`);
+
     return result;
   } catch (error) {
-    console.error('Error checking transaction existence:', error);
-    return false; // Assume doesn't exist on error to allow processing
+    console.error('❌ Error checking transaction existence:', error);
+    // On error, we should be conservative and assume it might exist to prevent double charging
+    // Return true to skip processing if we're unsure
+    return true;
   }
 }
 

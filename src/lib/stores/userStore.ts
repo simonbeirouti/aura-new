@@ -109,22 +109,38 @@ function createUserStore() {
    */
   async function refreshTokenBalance(force = false): Promise<void> {
     const currentState = get({ subscribe });
-    
-    if (!currentState.userId) return;
-    
-    const now = Date.now();
-    const cacheValid = currentState.lastTokenUpdate && 
-      (now - currentState.lastTokenUpdate) < currentState.cacheValidDuration;
-    
-    if (!force && cacheValid) {
+
+    if (!currentState.userId) {
+      console.log('⚠️ Cannot refresh token balance: no user ID');
       return;
     }
+
+    const now = Date.now();
+    const cacheValid = currentState.lastTokenUpdate &&
+      (now - currentState.lastTokenUpdate) < currentState.cacheValidDuration;
+
+    if (!force && cacheValid) {
+      console.log('💰 Token balance cache still valid, skipping refresh');
+      return;
+    }
+
+    console.log(`🔄 Refreshing token balance for user ${currentState.userId}${force ? ' (forced)' : ''}`);
 
     update(state => ({ ...state, tokenLoading: true, tokenError: null }));
 
     try {
       const balance = await getUserTokenBalance(currentState.userId);
-      
+
+      console.log(`✅ Token balance refreshed: ${balance.tokens_available} available, ${balance.tokens_used} used, ${balance.total_tokens} total`);
+
+      // Validate balance data
+      if (typeof balance.tokens_available !== 'number' ||
+          typeof balance.tokens_used !== 'number' ||
+          typeof balance.total_tokens !== 'number') {
+        console.error('❌ Invalid balance data received:', balance);
+        throw new Error('Invalid balance data structure');
+      }
+
       update(state => ({
         ...state,
         tokenBalance: balance,
@@ -132,10 +148,12 @@ function createUserStore() {
         tokenError: null,
         lastTokenUpdate: now
       }));
-      
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to load token balance';
-      
+
+      console.error(`❌ Failed to refresh token balance:`, errorMessage);
+
       update(state => ({
         ...state,
         tokenLoading: false,
@@ -282,8 +300,12 @@ function createUserStore() {
     
     // Check subscriptions and tokens every 30 minutes
     const subscriptionInterval = setInterval(() => {
-      refreshSubscriptions(true);
-      refreshTokenBalance(true);
+      // Only refresh if user is initialized and not currently loading
+      const currentState = get({ subscribe });
+      if (currentState.isInitialized && !currentState.tokenLoading && !currentState.subscriptionLoading) {
+        refreshSubscriptions(true);
+        refreshTokenBalance(true);
+      }
     }, 30 * 60 * 1000); // Combined check every 30 minutes
     
     // Comprehensive IAP sync check every 15 minutes (with reduced logging)
@@ -493,6 +515,35 @@ export const formattedUsedTokens = derived(
   userStore,
   ($user: UserState) => formatNumberWithCommas($user.tokenBalance.tokens_used)
 );
+
+// Handle app visibility changes to sync balance when app comes to foreground
+if (browser && typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      console.log('📱 App came to foreground, syncing user balance');
+
+      // Get current state to check if we have a user
+      let currentState: any = null;
+      const unsubscribe = userStore.subscribe((state) => {
+        currentState = state;
+      });
+      unsubscribe();
+
+      if (currentState?.isInitialized && currentState?.userId) {
+        // Refresh balance when app comes to foreground
+        // This ensures balance is correct if purchases happened while app was backgrounded
+        setTimeout(async () => {
+          try {
+            await userStore.refreshTokenBalance(true);
+            console.log('✅ User balance synced after app foreground');
+          } catch (error) {
+            console.warn('⚠️ Failed to sync balance on app foreground:', error);
+          }
+        }, 1000); // Small delay to allow other initialization to complete
+      }
+    }
+  });
+}
 
 // Auto-start periodic checks when store is initialized
 if (browser) {

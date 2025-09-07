@@ -1,4 +1,5 @@
 import { createEnhancedStore, storeManager, type BaseStore } from './core/storeManager';
+import { get } from 'svelte/store';
 import { invoke } from '@tauri-apps/api/core';
 import { sessionActions } from './sessionStore';
 import { loadingActions } from './loadingStore';
@@ -93,11 +94,9 @@ class DataStore {
     return this.store.subscribe;
   }
 
-  // Initialization
+  // Initialization with enhanced error handling and cache validation
   async initialize() {
-    let currentState: DataState | undefined;
-    const unsubscribe = this.store.subscribe(state => { currentState = state; });
-    unsubscribe();
+    const currentState = get(this.store);
 
     // Ensure we have a valid state
     if (!currentState) {
@@ -113,26 +112,47 @@ class DataStore {
     }));
 
     try {
-      // Load cached data first
+      // Step 1: Load cached data first
       await this.store.load();
 
-      // Initialize database connection with timeout
-      const connectionPromise = this.ensureDatabaseConnection();
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Database connection timeout')), 5000)
-      );
+      // Step 2: Validate and clean cache data
+      await this.validateCacheData();
 
-      try {
-        await Promise.race([connectionPromise, timeoutPromise]);
-      } catch (connectionError) {
-        // Continue without database connection - app can still work
+      // Step 3: Initialize database connection with timeout and retry
+      const maxRetries = 3;
+      let connectionSuccess = false;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const connectionPromise = this.ensureDatabaseConnection();
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Database connection timeout')), 5000)
+          );
+
+          await Promise.race([connectionPromise, timeoutPromise]);
+          connectionSuccess = true;
+          break;
+        } catch (connectionError) {
+          console.warn(`Database connection attempt ${attempt} failed:`, connectionError);
+          if (attempt < maxRetries) {
+            // Wait before retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+          }
+        }
       }
 
-      // Process offline queue (only if we have a connection)
-      try {
-        await this.processOfflineQueue();
-      } catch (queueError) {
-        // Continue anyway
+      if (!connectionSuccess) {
+        console.warn('Database connection failed after all retries, continuing with cached data');
+      }
+
+      // Step 4: Process offline queue (only if we have a connection)
+      if (connectionSuccess) {
+        try {
+          await this.processOfflineQueue();
+        } catch (queueError) {
+          console.warn('Failed to process offline queue:', queueError);
+          // Continue anyway
+        }
       }
 
       this.store.update(state => ({
@@ -141,7 +161,10 @@ class DataStore {
         isLoading: false
       }));
 
+      console.log('Data store initialized successfully');
+
     } catch (error) {
+      console.error('Data store initialization failed:', error);
       // Even if initialization fails, mark as initialized to prevent infinite loading
       this.store.update(state => ({
         ...state,
@@ -149,6 +172,58 @@ class DataStore {
         isInitialized: true,
         isLoading: false
       }));
+    }
+  }
+
+  // Cache validation and cleanup
+  private async validateCacheData(): Promise<void> {
+    const currentState = get(this.store);
+
+    if (!currentState) return;
+
+    const now = Date.now();
+    const maxCacheAge = 24 * 60 * 60 * 1000; // 24 hours
+    let hasChanges = false;
+
+    // Validate profile cache
+    if (currentState.profileCache && currentState.cacheTimestamps) {
+      const newCache = new Map(currentState.profileCache);
+      const newTimestamps = new Map(currentState.cacheTimestamps);
+
+      for (const [userId, timestamp] of newTimestamps) {
+        if (now - timestamp > maxCacheAge) {
+          newCache.delete(userId);
+          newTimestamps.delete(userId);
+          hasChanges = true;
+        }
+      }
+
+      if (hasChanges) {
+        this.store.update(state => ({
+          ...state,
+          profileCache: newCache,
+          cacheTimestamps: newTimestamps
+        }));
+
+        console.log('Cleaned up stale profile cache entries');
+      }
+    }
+
+    // Validate offline queue - remove very old entries
+    if (currentState.offlineQueue && currentState.offlineQueue.length > 0) {
+      const maxQueueAge = 7 * 24 * 60 * 60 * 1000; // 7 days
+      const newQueue = currentState.offlineQueue.filter(
+        item => (now - item.timestamp) < maxQueueAge
+      );
+
+      if (newQueue.length !== currentState.offlineQueue.length) {
+        this.store.update(state => ({
+          ...state,
+          offlineQueue: newQueue
+        }));
+
+        console.log(`Cleaned up ${currentState.offlineQueue.length - newQueue.length} old offline queue entries`);
+      }
     }
   }
 
@@ -220,19 +295,16 @@ class DataStore {
 
   // Refresh current profile from database (bypass cache)
   async refreshCurrentProfile(): Promise<Profile | null> {
-    return new Promise((resolve) => {
-      const unsubscribe = this.store.subscribe(async (state) => {
-        unsubscribe();
-        
-        if (!state.currentProfile?.id) {
-          resolve(null);
-          return;
-        }
+    const state = get(this.store);
 
-        try {
-          // Force refresh from database (bypass cache)
-          const refreshedProfile = await this.getUserProfile(state.currentProfile.id, false);
-      
+    if (!state.currentProfile?.id) {
+      return null;
+    }
+
+    try {
+      // Force refresh from database (bypass cache)
+      const refreshedProfile = await this.getUserProfile(state.currentProfile.id, false);
+
       if (refreshedProfile) {
         this.store.update(state => ({
           ...state,
@@ -240,17 +312,15 @@ class DataStore {
           error: null
         }));
       }
-      
-          resolve(refreshedProfile);
-        } catch (error) {
-          this.store.update(state => ({
-            ...state,
-            error: `Failed to refresh profile: ${error}`
-          }));
-          resolve(null);
-        }
-      });
-    });
+
+      return refreshedProfile;
+    } catch (error) {
+      this.store.update(state => ({
+        ...state,
+        error: `Failed to refresh profile: ${error}`
+      }));
+      return null;
+    }
   }
 
   async getUserProfile(userId: string, useCache: boolean = true): Promise<Profile | null> {
@@ -266,7 +336,15 @@ class DataStore {
       }
 
       // Fetch from database
-      const profile = await invoke<Profile | null>('get_user_profile', { userId });
+      console.log('DataStore: Fetching profile from database for userId:', userId);
+      let profile: Profile | null;
+      try {
+        profile = await invoke<Profile | null>('get_user_profile', { userId });
+        console.log('DataStore: Profile fetched from database:', profile);
+      } catch (invokeError) {
+        console.error('DataStore: Failed to invoke get_user_profile:', invokeError);
+        throw invokeError;
+      }
 
       // Defensive check for profile data structure
       if (profile && typeof profile === 'object' && profile.id) {
@@ -320,14 +398,22 @@ class DataStore {
       this.addPendingChange('update', { userId, ...updates });
 
       // Try to update immediately
-      const updatedProfile = await invoke<Profile>('update_user_profile', {
-        userId: userId,
-        username: updates.username,
-        fullName: updates.full_name,
-        avatarUrl: updates.avatar_url,
-        onboardingComplete: updates.onboarding_complete,
-        notifications: updates.notifications
-      });
+      console.log('DataStore: Updating profile for userId:', userId, 'with updates:', updates);
+      let updatedProfile: Profile;
+      try {
+        updatedProfile = await invoke<Profile>('update_user_profile', {
+          userId: userId,
+          username: updates.username,
+          fullName: updates.full_name,
+          avatarUrl: updates.avatar_url,
+          onboardingComplete: updates.onboarding_complete,
+          notifications: updates.notifications
+        });
+        console.log('DataStore: Profile updated in database:', updatedProfile);
+      } catch (invokeError) {
+        console.error('DataStore: Failed to invoke update_user_profile:', invokeError);
+        throw invokeError;
+      }
 
       if (updatedProfile) {
         // Update cache and current profile
@@ -368,14 +454,22 @@ class DataStore {
       this.addPendingChange('create', { userId, ...profileData });
 
       // Try to create immediately
-      const newProfile = await invoke<Profile>('create_user_profile', {
-        userId: userId,
-        username: profileData.username,
-        fullName: profileData.full_name,
-        avatarUrl: profileData.avatar_url,
-        onboardingComplete: profileData.onboarding_complete,
-        notifications: profileData.notifications
-      });
+      console.log('DataStore: Creating profile for userId:', userId, 'with data:', profileData);
+      let newProfile: Profile;
+      try {
+        newProfile = await invoke<Profile>('create_user_profile', {
+          userId: userId,
+          username: profileData.username,
+          fullName: profileData.full_name,
+          avatarUrl: profileData.avatar_url,
+          onboardingComplete: profileData.onboarding_complete,
+          notifications: profileData.notifications
+        });
+        console.log('DataStore: Profile created in database:', newProfile);
+      } catch (invokeError) {
+        console.error('DataStore: Failed to invoke create_user_profile:', invokeError);
+        throw invokeError;
+      }
 
       if (newProfile) {
         // Update cache and current profile
@@ -419,11 +513,8 @@ class DataStore {
 
   // Cache management
   private async getCachedProfile(userId: string): Promise<Profile | null> {
-    let currentState: DataState | undefined;
-
     try {
-      const unsubscribe = this.store.subscribe(state => { currentState = state; });
-      unsubscribe();
+      const currentState = get(this.store);
 
       // Ensure we have a valid state and required properties
       if (!currentState) {
@@ -510,9 +601,7 @@ class DataStore {
   // Offline queue management
   private async addToOfflineQueue(operation: string, params: any) {
     // Don't add to queue if we already have too many retries for this operation
-    let currentState: DataState | undefined;
-    const unsubscribe = this.store.subscribe(state => { currentState = state; });
-    unsubscribe();
+    const currentState = get(this.store);
 
     // Ensure offlineQueue exists and is an array
     if (!currentState || !Array.isArray(currentState.offlineQueue)) {
@@ -522,7 +611,7 @@ class DataStore {
     const existingItems = currentState.offlineQueue.filter(
       item => item.operation === operation && JSON.stringify(item.params) === JSON.stringify(params)
     );
-    
+
     // If we already have this operation queued with high retry count, don't add more
     if (existingItems.some(item => item.retryCount >= 7)) {
       return;
@@ -552,9 +641,7 @@ class DataStore {
   }
 
   private async processOfflineQueue() {
-    let currentState: DataState | undefined;
-    const unsubscribe = this.store.subscribe(state => { currentState = state; });
-    unsubscribe();
+    const currentState = get(this.store);
 
     // Ensure offlineQueue exists and is an array
     if (!currentState || !Array.isArray(currentState.offlineQueue)) {
@@ -601,8 +688,17 @@ class DataStore {
 
   // Sync management
   private setupPeriodicSync() {
+    // Re-enable periodic sync with safeguards
     this.syncInterval = setInterval(async () => {
-      await this.sync();
+      try {
+        // Only sync if we have data to sync and it's safe to do so
+        const currentState = get(this.store);
+        if (currentState.isInitialized && !currentState.isLoading) {
+          await this.sync();
+        }
+      } catch (error) {
+        console.warn('Periodic sync failed:', error);
+      }
     }, 30000); // Sync every 30 seconds
   }
 

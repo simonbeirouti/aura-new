@@ -195,6 +195,50 @@ pub async fn store_validate(store_id: String, app: tauri::AppHandle) -> Result<b
     Ok(has_data && has_timestamp)
 }
 
+/// Health check for store system
+#[command]
+pub async fn store_health_check(app: tauri::AppHandle) -> Result<Value, String> {
+    let mut health = serde_json::json!({
+        "status": "healthy",
+        "timestamp": chrono::Utc::now().timestamp_millis(),
+        "stores_checked": 0,
+        "errors": []
+    });
+
+    let stores_to_check = vec!["session", "app_data", "cache_manager"];
+    let mut checked = 0;
+    let mut errors = Vec::new();
+
+    for store_id in stores_to_check {
+        let store_file = format!("{}.store", store_id);
+        match app.store(&store_file) {
+            Ok(store) => {
+                // Check if store has basic structure
+                let has_data = store.get("data").is_some();
+                let has_timestamp = store.get("last_updated").is_some();
+
+                if !has_data || !has_timestamp {
+                    errors.push(format!("Store {} missing required data", store_id));
+                }
+                checked += 1;
+            }
+            Err(e) => {
+                errors.push(format!("Failed to access store {}: {}", store_id, e));
+            }
+        }
+    }
+
+    // Update health status
+    if !errors.is_empty() {
+        health["status"] = serde_json::json!("degraded");
+        health["errors"] = serde_json::json!(errors);
+    }
+
+    health["stores_checked"] = serde_json::json!(checked);
+
+    Ok(health)
+}
+
 /// Get store health information
 #[command]
 pub async fn store_health(app: tauri::AppHandle) -> Result<HashMap<String, Value>, String> {

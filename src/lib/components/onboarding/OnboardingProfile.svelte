@@ -1,5 +1,6 @@
 <script lang="ts">
     import { createEventDispatcher, onMount } from "svelte";
+    import { get } from "svelte/store";
     import { centralizedAuth } from "../../stores/unifiedAuth";
     import { dataStore } from "../../stores/dataStore";
     import {
@@ -41,14 +42,15 @@
         loadingActions.showProfile();
         
         try {
-            if ($centralizedAuth.user) {
+            const authState = get(centralizedAuth.getStore());
+            if (authState.user) {
                 // Initialize from user metadata if available
-                profileData.full_name = $centralizedAuth.user.user_metadata?.full_name || "";
-                profileData.avatar_url = $centralizedAuth.user.user_metadata?.avatar_url || "";
-                
+                profileData.full_name = authState.user.user_metadata?.full_name || "";
+                profileData.avatar_url = authState.user.user_metadata?.avatar_url || "";
+
                 // Try to load existing profile data
                 try {
-                    const existingProfile = await dataStore.getUserProfile($centralizedAuth.user.id);
+                    const existingProfile = await dataStore.getUserProfile(authState.user.id);
                     if (existingProfile) {
                         profileData.full_name = existingProfile.full_name || profileData.full_name;
                         profileData.username = existingProfile.username || "";
@@ -75,7 +77,8 @@
         const input = event.target as HTMLInputElement;
         const file = input.files?.[0];
 
-        if (!file || !$centralizedAuth.user) return;
+        const authState = get(centralizedAuth.getStore());
+        if (!file || !authState.user) return;
 
         try {
             // Validate file
@@ -90,7 +93,7 @@
             // Upload to storage
             isUploading = true;
 
-            const result = await uploadAvatar(file, $centralizedAuth.user.id);
+            const result = await uploadAvatar(file, authState.user.id);
             if (result.success && result.publicUrl) {
                 profileData.avatar_url = result.publicUrl;
                 
@@ -173,48 +176,124 @@
     }
 
     async function completeOnboarding(isSkipped = false) {
-        if (!$centralizedAuth.user) {
+        console.log('completeOnboarding called with isSkipped:', isSkipped);
+
+        const authState = get(centralizedAuth.getStore());
+
+        if (!authState?.user) {
+            console.log('No authenticated user found, cannot complete onboarding');
             return;
         }
 
+        const userId = authState.user.id;
+        const userEmail = authState.user.email;
+        console.log('Starting onboarding completion for user:', userId);
         isSaving = true;
 
         try {
             // Create or update user profile
             const profilePayload = {
-                full_name: profileData.full_name || $centralizedAuth.user.email || "",
+                full_name: profileData.full_name || userEmail || "",
                 username: profileData.username || "",
                 avatar_url: profileData.avatar_url || "",
                 onboarding_complete: true,
             };
 
+            console.log('Creating/updating profile with payload:', profilePayload);
+
             // Try to get existing profile first
             let existingProfile = null;
             try {
-                existingProfile = await dataStore.getUserProfile(
-                    $centralizedAuth.user.id,
-                );
+                console.log('Fetching existing profile for user:', userId);
+                existingProfile = await dataStore.getUserProfile(userId);
+                console.log('Existing profile found:', existingProfile);
             } catch (error) {
+                console.log('No existing profile found, will create new one. Error:', error);
                 // No existing profile found, will create new one
             }
 
+            let updatedProfile;
             if (existingProfile) {
                 // Update existing profile
-                await dataStore.updateUserProfile($centralizedAuth.user.id, {
+                console.log('Updating existing profile:', existingProfile);
+                console.log('Update payload:', {
                     full_name: profilePayload.full_name,
                     username: profilePayload.username,
                     avatar_url: profilePayload.avatar_url,
                     onboarding_complete: profilePayload.onboarding_complete,
                 });
+                try {
+                    updatedProfile = await dataStore.updateUserProfile(userId, {
+                        full_name: profilePayload.full_name,
+                        username: profilePayload.username,
+                        avatar_url: profilePayload.avatar_url,
+                        onboarding_complete: profilePayload.onboarding_complete,
+                    });
+                    console.log('Profile updated successfully:', updatedProfile);
+                    console.log('Onboarding complete status in updated profile:', updatedProfile?.onboarding_complete);
+                } catch (updateError) {
+                    console.error('Profile update failed:', updateError);
+                    throw updateError;
+                }
             } else {
                 // Create new profile
-                await dataStore.createUserProfile($centralizedAuth.user.id, {
+                console.log('Creating new profile with payload:', {
                     full_name: profilePayload.full_name,
                     username: profilePayload.username,
                     avatar_url: profilePayload.avatar_url,
                     onboarding_complete: profilePayload.onboarding_complete,
                 });
+                try {
+                    updatedProfile = await dataStore.createUserProfile(userId, {
+                        full_name: profilePayload.full_name,
+                        username: profilePayload.username,
+                        avatar_url: profilePayload.avatar_url,
+                        onboarding_complete: profilePayload.onboarding_complete,
+                    });
+                    console.log('Profile created successfully:', updatedProfile);
+                    console.log('Onboarding complete status in created profile:', updatedProfile?.onboarding_complete);
+                } catch (createError) {
+                    console.error('Profile creation failed:', createError);
+                    throw createError;
+                }
             }
+
+            // Update the profile in the store directly instead of relying on refresh
+            console.log('Updating profile in auth store directly');
+            const authState = get(centralizedAuth.getStore());
+            console.log('Current profile in store:', authState.profile);
+            console.log('Update payload:', profilePayload);
+
+            const updatedProfileInStore = {
+                ...authState.profile,
+                ...profilePayload,
+                updated_at: new Date().toISOString()
+            };
+
+            console.log('Updated profile object:', updatedProfileInStore);
+
+            // Update the auth store directly
+            centralizedAuth.getStore().update(state => ({
+                ...state,
+                profile: updatedProfileInStore,
+                profileLoaded: true
+            }));
+
+            console.log('Profile updated in store:', updatedProfileInStore);
+
+            // Also try to refresh from database as backup
+            try {
+                await centralizedAuth.refreshProfile();
+                console.log('Profile refresh completed as backup');
+            } catch (refreshError) {
+                console.warn('Profile refresh failed, but store was updated directly:', refreshError);
+            }
+
+            // Clear form data
+            profileData.full_name = "";
+            profileData.username = "";
+            profileData.avatar_url = "";
+            avatarPreview = "";
 
             // Reset view before dispatching completion
             resetView();
@@ -222,14 +301,14 @@
             // Show success message before dispatching completion
             toast.success("Profile setup complete! Welcome to Aura.");
 
-            // Small delay to ensure view reset completes and user sees success message
+            // Wait longer to ensure database transaction is fully committed
             setTimeout(() => {
                 // Dispatch completion event
                 dispatch("complete", {
                     skipped: isSkipped,
                     profile: profilePayload,
                 });
-            }, 800); // Increased delay to show success message
+            }, 1500); // Increased delay to ensure database commit
             
         } catch (error) {
             // Reset view even on error

@@ -87,6 +87,7 @@ pub fn run() {
             enhanced_store::store_restore,
             enhanced_store::store_sync,
             enhanced_store::store_validate,
+            enhanced_store::store_health_check,
             enhanced_store::store_health,
             // IAP database management commands
             iap_database::save_iap_transaction,
