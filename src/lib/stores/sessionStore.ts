@@ -114,7 +114,7 @@ class SessionStore {
     try {
       await this.clearTokensSecurely();
     } catch (tokenError) {
-      console.warn('Failed to clear tokens:', tokenError);
+      // Continue silently on token clear failure
     }
     
     // Reset to unauthenticated state (simple update)
@@ -131,7 +131,6 @@ class SessionStore {
         tokenExpiresAt: null
       }));
     } catch (updateError) {
-      console.error('Failed to update session store:', updateError);
       // Force reset the store if update fails
       this.store.set({
         user: null,
@@ -184,25 +183,20 @@ class SessionStore {
   // Token management with Tauri secure storage
   private async storeTokensSecurely(accessToken: string, refreshToken: string) {
     try {
-      console.log('SessionStore: Storing tokens securely');
       await invoke('store_tokens', {
         tokens: {
           accessToken,
           refreshToken
         }
       });
-      console.log('SessionStore: Tokens stored successfully');
 
       // Also initialize database configuration for IAP functions
-      console.log('SessionStore: Initializing database with tokens');
       await invoke('init_database', {
         databaseUrl: import.meta.env.VITE_SUPABASE_URL,
         accessToken,
         anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY
       });
-      console.log('SessionStore: Database initialized successfully');
     } catch (error) {
-      console.error('SessionStore: Error storing tokens or initializing database:', error);
       throw error;
     }
   }
@@ -217,26 +211,20 @@ class SessionStore {
 
   async getStoredTokens(): Promise<{ accessToken: string; refreshToken: string } | null> {
     try {
-      console.log('SessionStore: Retrieving stored tokens');
       const tokens = await invoke<{ access_token: string; refresh_token: string }>('get_tokens');
-      console.log('SessionStore: Tokens retrieved successfully');
       return {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token
       };
     } catch (error) {
-      console.warn('SessionStore: No stored tokens found:', error);
       return null;
     }
   }
 
   async hasValidSession(): Promise<boolean> {
     try {
-      console.log('🔍 Checking session validity...');
-
       // First check with backend
       const backendValid = await invoke<boolean>('check_session');
-      console.log('📡 Backend session check result:', backendValid);
 
       if (backendValid) {
         // Also validate token expiry if we have it
@@ -246,26 +234,15 @@ class SessionStore {
           const expiryBuffer = 5 * 60 * 1000; // 5 minutes buffer
           const isValidExpiry = state.tokenExpiresAt > (now + expiryBuffer);
 
-          console.log('⏰ Token expiry check:', {
-            tokenExpiresAt: new Date(state.tokenExpiresAt).toISOString(),
-            now: new Date(now).toISOString(),
-            buffer: expiryBuffer / 1000 + 's',
-            isValid: isValidExpiry
-          });
-
           return isValidExpiry;
         }
 
-        console.log('✅ No token expiry set, considering valid');
         return true;
       }
 
-      console.log('❌ Backend reported invalid session');
       return false;
     } catch (error) {
-      console.warn('⚠️ Session check failed:', error);
       // If backend check fails, assume session is valid to avoid unnecessary resets
-      console.log('⚠️ Backend check failed, assuming session valid to prevent auth reset');
       return true;
     }
   }
@@ -336,7 +313,6 @@ class SessionStore {
       this.scheduleTokenRefresh();
       
     } catch (error) {
-      console.error('Token refresh failed:', error);
       await this.setUnauthenticated('Token refresh failed');
     }
   }

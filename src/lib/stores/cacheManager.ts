@@ -205,7 +205,6 @@ class CacheManager {
       this.set(key, data, ttl);
       return data;
     } catch (error) {
-      console.error(`Failed to load data for key ${key}:`, error);
       throw error;
     }
   }
@@ -217,7 +216,6 @@ class CacheManager {
       this.set(key, data, ttl);
       return data;
     } catch (error) {
-      console.error(`Failed to refresh data for key ${key}:`, error);
       throw error;
     }
   }
@@ -341,8 +339,6 @@ class CacheManager {
           entries: newEntries
         };
       });
-
-      console.log(`Cache validation: removed ${entriesToRemove.length} invalid entries`);
     }
   }
 
@@ -365,11 +361,9 @@ class CacheManager {
           entries,
           stats: cacheData.stats || s.stats
         }));
-
-        console.log(`Loaded ${entries.size} cache entries from disk`);
       }
     } catch (error) {
-      console.warn('Failed to load cache from disk:', error);
+      // Continue silently on cache load failure
     }
   }
 
@@ -395,7 +389,7 @@ class CacheManager {
         }
       });
     } catch (error) {
-      console.warn('Failed to save cache to disk:', error);
+      // Continue silently on cache save failure
     }
   }
 
@@ -425,15 +419,12 @@ class CacheManager {
         invalidatedCount++;
       }
     });
-
-    console.log(`Invalidated ${invalidatedCount} cache entries after purchase completion`);
   }
 
   // Invalidate all user-specific cache entries (useful for logout)
   invalidateUserCache(userId: string): number {
     const pattern = new RegExp(`.*${userId}.*`);
     const invalidatedCount = this.invalidatePattern(pattern);
-    console.log(`Invalidated ${invalidatedCount} user-specific cache entries for user ${userId}`);
     return invalidatedCount;
   }
 
@@ -463,8 +454,6 @@ class CacheManager {
           entries: newEntries
         };
       });
-
-      console.log(`Refreshed ${entriesToRefresh.length} stale cache entries matching pattern`);
     }
   }
 

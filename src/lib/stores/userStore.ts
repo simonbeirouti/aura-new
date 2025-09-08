@@ -111,7 +111,6 @@ function createUserStore() {
     const currentState = get({ subscribe });
 
     if (!currentState.userId) {
-      console.log('⚠️ Cannot refresh token balance: no user ID');
       return;
     }
 
@@ -120,24 +119,18 @@ function createUserStore() {
       (now - currentState.lastTokenUpdate) < currentState.cacheValidDuration;
 
     if (!force && cacheValid) {
-      console.log('💰 Token balance cache still valid, skipping refresh');
       return;
     }
-
-    console.log(`🔄 Refreshing token balance for user ${currentState.userId}${force ? ' (forced)' : ''}`);
 
     update(state => ({ ...state, tokenLoading: true, tokenError: null }));
 
     try {
       const balance = await getUserTokenBalance(currentState.userId);
 
-      console.log(`✅ Token balance refreshed: ${balance.tokens_available} available, ${balance.tokens_used} used, ${balance.total_tokens} total`);
-
       // Validate balance data
       if (typeof balance.tokens_available !== 'number' ||
           typeof balance.tokens_used !== 'number' ||
           typeof balance.total_tokens !== 'number') {
-        console.error('❌ Invalid balance data received:', balance);
         throw new Error('Invalid balance data structure');
       }
 
@@ -151,8 +144,6 @@ function createUserStore() {
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to load token balance';
-
-      console.error(`❌ Failed to refresh token balance:`, errorMessage);
 
       update(state => ({
         ...state,
@@ -320,17 +311,16 @@ function createUserStore() {
           // Sync IAP status changes to database
           const syncResult = await syncSubscriptionsWithIAP(currentState.userId);
           
-          if (syncResult.updated > 0) {            
+          if (syncResult.updated > 0) {
             // Refresh user store to reflect database changes
             await refreshSubscriptions(true);
           }
-          // Removed the "No subscription updates needed" log to reduce noise
-          
+
           if (syncResult.errors.length > 0) {
-            console.error('⚠️ Sync errors:', syncResult.errors);
+            // Continue silently on sync errors
           }
         } catch (error) {
-          console.error('❌ IAP sync check failed:', error);
+          // Continue silently on IAP sync check failures
         }
       }
     }, 15 * 60 * 1000); // Every 15 minutes
@@ -400,7 +390,6 @@ function createUserStore() {
     try {
       return await invoke<Product[]>('get_products');
     } catch (error) {
-      console.error('Failed to fetch products:', error);
       throw error;
     }
   }
@@ -410,7 +399,7 @@ function createUserStore() {
    */
   async function getPurchaseHistory(): Promise<Purchase[]> {
     const currentState = get({ subscribe });
-    
+
     if (!currentState.userId) {
       throw new Error('User not initialized');
     }
@@ -420,7 +409,6 @@ function createUserStore() {
         userId: currentState.userId
       });
     } catch (error) {
-      console.error('Failed to fetch purchase history:', error);
       throw error;
     }
   }
@@ -520,8 +508,6 @@ export const formattedUsedTokens = derived(
 if (browser && typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
-      console.log('📱 App came to foreground, syncing user balance');
-
       // Get current state to check if we have a user
       let currentState: any = null;
       const unsubscribe = userStore.subscribe((state) => {
@@ -535,9 +521,8 @@ if (browser && typeof document !== 'undefined') {
         setTimeout(async () => {
           try {
             await userStore.refreshTokenBalance(true);
-            console.log('✅ User balance synced after app foreground');
           } catch (error) {
-            console.warn('⚠️ Failed to sync balance on app foreground:', error);
+            // Continue silently on sync failure
           }
         }, 1000); // Small delay to allow other initialization to complete
       }

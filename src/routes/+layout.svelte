@@ -30,9 +30,14 @@
   let initializationErrors: string[] = [];
   let biometricAuthRequired = false;
   let biometricAuthComplete = false;
+  let lastVisibilityCheck = Date.now();
+  let cleanupVisibilityHandler: (() => void) | null = null;
 
   onMount(async () => {
     loadingActions.showApp();
+
+    // Setup visibility change handler for emergency cleanup
+    cleanupVisibilityHandler = setupVisibilityHandler() || null;
 
     try {
       const result = await centralizedAuth.initialize();
@@ -62,7 +67,6 @@
             biometricAuthComplete = true;
           }
         } catch (biometricError) {
-          console.warn('Biometric initialization failed, continuing without biometric auth:', biometricError);
           biometricAuthComplete = true;
         }
       } else {
@@ -141,10 +145,70 @@
     }, 2000);
   }
 
+  // Handle app visibility changes for emergency cleanup
+  function setupVisibilityHandler() {
+    if (typeof document !== 'undefined') {
+      const handleVisibilityChange = () => {
+        if (!document.hidden) {
+          const now = Date.now();
+          const timeAway = now - lastVisibilityCheck;
+
+          // If app was away for more than 30 minutes, trigger emergency cleanup
+          if (timeAway > 30 * 60 * 1000) {
+            performEmergencyCleanup();
+          }
+
+          lastVisibilityCheck = now;
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+
+      // Return cleanup function
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      };
+    }
+  }
+
+  async function performEmergencyCleanup() {
+    try {
+      // Clear all loading states
+      const { loadingStore } = await import('$lib/stores/loadingStore');
+      loadingStore.clear();
+
+      // Emergency cleanup for key stores
+      try {
+        (centralizedAuth as any).emergencyCleanup?.();
+      } catch (error) {
+        // Continue silently on auth cleanup error
+      }
+
+      // Import and cleanup dataStore
+      try {
+        const { dataStore } = await import('$lib/stores/dataStore');
+        (dataStore as any).emergencyCleanup?.();
+      } catch (error) {
+        // Continue silently on dataStore cleanup error
+      }
+
+      // Import and cleanup purchaseStore
+      const { purchaseManager } = await import('$lib/stores/purchaseStore');
+      purchaseManager.clearAllPurchaseErrors();
+    } catch (error) {
+      // Continue silently on emergency cleanup error
+    }
+  }
+
   // Cleanup timeout on destroy
   onDestroy(() => {
     if (loadingTimeout) {
       clearTimeout(loadingTimeout);
+    }
+
+    // Cleanup visibility handler
+    if (cleanupVisibilityHandler) {
+      cleanupVisibilityHandler();
     }
   });
 </script>

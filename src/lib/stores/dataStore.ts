@@ -68,6 +68,8 @@ const initialDataState: DataState = {
 class DataStore {
   private store: BaseStore<DataState>;
   private syncInterval: NodeJS.Timeout | null = null;
+  private isInitializing: boolean = false;
+  private initializationPromise: Promise<void> | null = null;
 
   constructor() {
     this.store = createEnhancedStore('app_data', initialDataState, {
@@ -96,6 +98,15 @@ class DataStore {
 
   // Initialization with enhanced error handling and cache validation
   async initialize() {
+    // Prevent multiple simultaneous initializations
+    if (this.isInitializing) {
+      return this.initializationPromise;
+    }
+
+    if (this.initializationPromise) {
+      return this.initializationPromise;
+    }
+
     const currentState = get(this.store);
 
     // Ensure we have a valid state
@@ -103,8 +114,19 @@ class DataStore {
       return;
     }
 
-    if (currentState.isInitialized) return;
+    if (currentState.isInitialized) {
+      return;
+    }
 
+    // Set initialization guard
+    this.isInitializing = true;
+    this.initializationPromise = this._performInitialization();
+
+    return this.initializationPromise;
+  }
+
+  // Private method containing the actual initialization logic
+  private async _performInitialization(): Promise<void> {
     this.store.update(state => ({
       ...state,
       isLoading: true,
@@ -161,8 +183,6 @@ class DataStore {
         isLoading: false
       }));
 
-      console.log('Data store initialized successfully');
-
     } catch (error) {
       console.error('Data store initialization failed:', error);
       // Even if initialization fails, mark as initialized to prevent infinite loading
@@ -172,6 +192,10 @@ class DataStore {
         isInitialized: true,
         isLoading: false
       }));
+    } finally {
+      // Clear initialization guard
+      this.isInitializing = false;
+      this.initializationPromise = null;
     }
   }
 
@@ -204,8 +228,6 @@ class DataStore {
           profileCache: newCache,
           cacheTimestamps: newTimestamps
         }));
-
-        console.log('Cleaned up stale profile cache entries');
       }
     }
 
@@ -221,8 +243,6 @@ class DataStore {
           ...state,
           offlineQueue: newQueue
         }));
-
-        console.log(`Cleaned up ${currentState.offlineQueue.length - newQueue.length} old offline queue entries`);
       }
     }
   }
@@ -335,12 +355,9 @@ class DataStore {
         }
       }
 
-      // Fetch from database
-      console.log('DataStore: Fetching profile from database for userId:', userId);
       let profile: Profile | null;
       try {
         profile = await invoke<Profile | null>('get_user_profile', { userId });
-        console.log('DataStore: Profile fetched from database:', profile);
       } catch (invokeError) {
         console.error('DataStore: Failed to invoke get_user_profile:', invokeError);
         throw invokeError;
@@ -398,7 +415,6 @@ class DataStore {
       this.addPendingChange('update', { userId, ...updates });
 
       // Try to update immediately
-      console.log('DataStore: Updating profile for userId:', userId, 'with updates:', updates);
       let updatedProfile: Profile;
       try {
         updatedProfile = await invoke<Profile>('update_user_profile', {
@@ -409,7 +425,6 @@ class DataStore {
           onboardingComplete: updates.onboarding_complete,
           notifications: updates.notifications
         });
-        console.log('DataStore: Profile updated in database:', updatedProfile);
       } catch (invokeError) {
         console.error('DataStore: Failed to invoke update_user_profile:', invokeError);
         throw invokeError;
@@ -454,7 +469,6 @@ class DataStore {
       this.addPendingChange('create', { userId, ...profileData });
 
       // Try to create immediately
-      console.log('DataStore: Creating profile for userId:', userId, 'with data:', profileData);
       let newProfile: Profile;
       try {
         newProfile = await invoke<Profile>('create_user_profile', {
@@ -465,7 +479,6 @@ class DataStore {
           onboardingComplete: profileData.onboarding_complete,
           notifications: profileData.notifications
         });
-        console.log('DataStore: Profile created in database:', newProfile);
       } catch (invokeError) {
         console.error('DataStore: Failed to invoke create_user_profile:', invokeError);
         throw invokeError;
@@ -688,8 +701,6 @@ class DataStore {
 
   // Sync management
   private setupPeriodicSync() {
-    console.log('🔄 Setting up periodic sync with conflict resolution');
-
     // Re-enable periodic sync with enhanced safeguards
     this.syncInterval = setInterval(async () => {
       try {
@@ -703,39 +714,41 @@ class DataStore {
 
         // Skip if currently loading
         if (currentState.isLoading) {
-          console.log('⚠️ Skipping periodic sync - currently loading');
           return;
+        }
+
+        // Skip if app has been inactive for more than 1 hour
+        if (currentState.lastSync) {
+          const now = Date.now();
+          const oneHour = 60 * 60 * 1000;
+          if ((now - currentState.lastSync) > oneHour) {
+            return;
+          }
         }
 
         // Skip if we have pending changes that haven't been processed
         if (currentState.pendingChanges.length > 0) {
-          console.log('⚠️ Skipping periodic sync - pending changes exist');
           return;
         }
 
         // Skip if offline queue is too large (backpressure)
         if (currentState.offlineQueue && currentState.offlineQueue.length > 50) {
-          console.log('⚠️ Skipping periodic sync - offline queue too large');
           return;
         }
 
         // Check network connectivity (basic check)
         if (typeof navigator !== 'undefined' && !navigator.onLine) {
-          console.log('⚠️ Skipping periodic sync - offline');
           return;
         }
 
         // All checks passed - perform sync
-        console.log('🔄 Executing periodic sync...');
         await this.sync();
 
       } catch (error) {
         console.warn('⚠️ Periodic sync failed:', error);
         // Don't let sync failures crash the app
       }
-    }, 45000); // Sync every 45 seconds (less frequent to reduce load)
-
-    console.log('✅ Periodic sync setup complete');
+    }, 300000); // Sync every 5 minutes (much less frequent to reduce load)
   }
 
   async sync() {
@@ -744,7 +757,6 @@ class DataStore {
 
       // Skip sync if not initialized or if we recently synced
       if (!currentState.isInitialized) {
-        console.log('⚠️ Skipping sync - data store not initialized');
         return;
       }
 
@@ -754,11 +766,8 @@ class DataStore {
 
       // Skip if synced recently (within 10 seconds)
       if (timeSinceLastSync < 10000) {
-        console.log('⚠️ Skipping sync - recently synced');
         return;
       }
-
-      console.log('🔄 Starting data sync with conflict resolution...');
 
       // Step 1: Sync with enhanced store (basic persistence)
       await this.store.sync();
@@ -777,9 +786,6 @@ class DataStore {
         ...state,
         lastSync: now
       }));
-
-      console.log('✅ Data sync completed successfully');
-
     } catch (error) {
       console.warn('⚠️ Data sync failed:', error);
       // Don't fail completely - just log the error
@@ -804,7 +810,6 @@ class DataStore {
       const serverProfile = await this.fetchLatestProfileFromServer(profile.id);
 
       if (!serverProfile) {
-        console.log('⚠️ No server profile found for conflict resolution');
         return;
       }
 
@@ -812,8 +817,6 @@ class DataStore {
       const conflicts = this.detectProfileConflicts(profile, serverProfile);
 
       if (conflicts.length > 0) {
-        console.log('⚠️ Profile conflicts detected:', conflicts);
-
         // Resolve conflicts
         const resolvedProfile = await this.resolveProfileConflicts(profile, serverProfile, conflicts);
 
@@ -822,11 +825,8 @@ class DataStore {
           await this.updateLocalProfileWithResolvedData(resolvedProfile);
         }
       } else {
-        console.log('✅ No profile conflicts detected');
-
         // No conflicts - update local timestamps if server data is newer
         if (this.isServerDataNewer(profile, serverProfile)) {
-          console.log('📋 Server data is newer, updating local cache...');
           await this.updateLocalProfileCache(serverProfile);
         }
       }
@@ -842,14 +842,8 @@ class DataStore {
    */
   private async fetchLatestProfileFromServer(userId: string): Promise<Profile | null> {
     try {
-      const { data, error } = await invoke<Profile>('get_user_profile', { userId });
-
-      if (error) {
-        console.warn('Failed to fetch server profile:', error);
-        return null;
-      }
-
-      return data || null;
+      const profile = await invoke<Profile | null>('get_user_profile', { userId });
+      return profile;
     } catch (error) {
       console.warn('Error fetching server profile:', error);
       return null;
@@ -865,10 +859,15 @@ class DataStore {
     serverValue: any;
     conflictType: 'value_mismatch' | 'timestamp_mismatch';
   }> {
-    const conflicts = [];
+    const conflicts: Array<{
+      field: string;
+      localValue: any;
+      serverValue: any;
+      conflictType: 'value_mismatch' | 'timestamp_mismatch';
+    }> = [];
 
     // Compare key fields that might have conflicts
-    const conflictFields = ['username', 'full_name', 'avatar_url', 'notifications', 'onboarding_complete'];
+    const conflictFields: Array<keyof Profile> = ['username', 'full_name', 'avatar_url', 'notifications', 'onboarding_complete'];
 
     for (const field of conflictFields) {
       const localValue = local[field];
@@ -914,7 +913,6 @@ class DataStore {
     try {
       // Strategy 1: For onboarding_complete, server always wins
       if (conflicts.some(c => c.field === 'onboarding_complete')) {
-        console.log('🎯 Resolving onboarding_complete conflict - server wins');
         return {
           ...local,
           onboarding_complete: server.onboarding_complete,
@@ -927,27 +925,23 @@ class DataStore {
         const usernameConflict = conflicts.find(c => c.field === 'username');
 
         if (!server.username && local.username) {
-          console.log('🎯 Resolving username conflict - local wins (server empty)');
           return {
             ...server,
             username: local.username,
             updated_at: new Date().toISOString()
           };
         } else if (server.username && !local.username) {
-          console.log('🎯 Resolving username conflict - server wins (local empty)');
           return server;
         } else {
           // Both have values - check if local username is still available
           const isAvailable = await this.checkUsernameAvailability(local.username!);
           if (isAvailable) {
-            console.log('🎯 Resolving username conflict - local wins (available)');
             return {
               ...server,
               username: local.username,
               updated_at: new Date().toISOString()
             };
           } else {
-            console.log('🎯 Resolving username conflict - server wins (local unavailable)');
             return server;
           }
         }
@@ -958,10 +952,8 @@ class DataStore {
       const serverTime = new Date(server.updated_at || 0).getTime();
 
       if (serverTime > localTime) {
-        console.log('🎯 Resolving conflicts - server wins (newer timestamp)');
         return server;
       } else {
-        console.log('🎯 Resolving conflicts - local wins (newer or equal timestamp)');
         return {
           ...server,
           ...local,
@@ -972,7 +964,6 @@ class DataStore {
     } catch (error) {
       console.warn('⚠️ Error resolving conflicts:', error);
       // Fallback: server wins
-      console.log('🎯 Fallback conflict resolution - server wins');
       return server;
     }
   }
@@ -993,9 +984,6 @@ class DataStore {
 
       // Sync to server
       await this.syncResolvedProfileToServer(resolvedProfile);
-
-      console.log('✅ Local profile updated with resolved data');
-
     } catch (error) {
       console.warn('⚠️ Failed to update local profile with resolved data:', error);
     }
@@ -1029,9 +1017,6 @@ class DataStore {
         userId: profile.id,
         updates: profile
       });
-
-      console.log('✅ Resolved profile synced to server');
-
     } catch (error) {
       console.warn('⚠️ Failed to sync resolved profile to server:', error);
       // Add to offline queue for retry
@@ -1093,10 +1078,6 @@ class DataStore {
           }
         }
 
-        if (hasCleanup) {
-          console.log('🧹 Cleaned up old cache entries');
-        }
-
         return {
           ...state,
           profileCache: newCache,
@@ -1127,8 +1108,23 @@ class DataStore {
   destroy() {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
+      this.syncInterval = null;
     }
     this.store.destroy();
+  }
+
+  // Emergency cleanup for background operations
+  emergencyCleanup() {
+    if (this.syncInterval) {
+      clearInterval(this.syncInterval);
+      this.syncInterval = null;
+    }
+
+    // Clear any pending operations
+    this.store.update(state => ({
+      ...state,
+      offlineQueue: []
+    }));
   }
 }
 

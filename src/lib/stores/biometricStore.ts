@@ -24,6 +24,7 @@ interface BiometricState {
   error: string | null;
   isInitialized: boolean;
   authenticating: boolean;
+  lastInitialized?: number;
 }
 
 // Initial state
@@ -50,7 +51,6 @@ export const biometricActions = {
   // Initialize biometric store with enhanced error handling
   async initialize(forceRefresh = false): Promise<void> {
     if (!isUserAuthenticated()) {
-      console.warn('Cannot initialize biometric: User not authenticated');
       return;
     }
 
@@ -59,11 +59,13 @@ export const biometricActions = {
     const now = Date.now();
     const thirtyMinutes = 30 * 60 * 1000;
 
-    if (!forceRefresh && currentState.isInitialized && currentState.lastAuthenticated &&
-        (now - currentState.lastAuthenticated) < thirtyMinutes) {
-      console.log('Biometric already initialized recently, skipping');
+    if (!forceRefresh && currentState.isInitialized && currentState.lastInitialized &&
+        (now - currentState.lastInitialized) < thirtyMinutes) {
       return;
     }
+
+    // Update last initialized timestamp
+    biometricStore.update(s => ({ ...s, lastInitialized: now }));
 
     biometricStore.update(s => ({ ...s, loading: true, error: null }));
 
@@ -78,7 +80,7 @@ export const biometricActions = {
         this.checkAvailability()
       ]);
 
-      const [settings, status] = await Promise.race([initPromise, timeoutPromise]);
+      const [settings, status] = await Promise.race([initPromise, timeoutPromise]) as [BiometricSettings, BiometricStatus];
 
       biometricStore.update(s => ({
         ...s,
@@ -89,10 +91,7 @@ export const biometricActions = {
         error: null
       }));
 
-      console.log('Biometric store initialized successfully');
-
     } catch (error) {
-      console.error('Failed to initialize biometric store:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to initialize biometric';
 
       biometricStore.update(s => ({
@@ -113,7 +112,6 @@ export const biometricActions = {
       biometricStore.update(s => ({ ...s, settings, error: null }));
       return settings;
     } catch (error) {
-      console.error('Failed to load biometric settings:', error);
       throw error;
     }
   },
@@ -130,7 +128,6 @@ export const biometricActions = {
         loading: false
       }));
     } catch (error) {
-      console.error('Failed to update biometric settings:', error);
       biometricStore.update(s => ({
         ...s,
         loading: false,
@@ -147,7 +144,6 @@ export const biometricActions = {
       biometricStore.update(s => ({ ...s, status }));
       return status;
     } catch (error) {
-      console.error('Failed to check biometric availability:', error);
       const errorStatus: BiometricStatus = {
         available: false,
         enrolled: false,
@@ -164,7 +160,7 @@ export const biometricActions = {
 
     try {
       const success = await invoke<boolean>('authenticate_biometric', { reason });
-      
+
       if (success) {
         // Reload settings to get updated last_authenticated timestamp
         await this.loadSettings();
@@ -173,7 +169,6 @@ export const biometricActions = {
       biometricStore.update(s => ({ ...s, authenticating: false }));
       return success;
     } catch (error) {
-      console.error('Biometric authentication failed:', error);
       biometricStore.update(s => ({
         ...s,
         authenticating: false,
@@ -188,17 +183,16 @@ export const biometricActions = {
     biometricStore.update(s => ({ ...s, loading: true, error: null }));
 
     try {
-      await invoke('set_biometric_enabled', { 
-        enabled, 
-        requireOnStartup 
+      await invoke('set_biometric_enabled', {
+        enabled,
+        requireOnStartup
       });
-      
+
       // Reload settings to get updated state
       await this.loadSettings();
-      
+
       biometricStore.update(s => ({ ...s, loading: false }));
     } catch (error) {
-      console.error('Failed to update biometric enabled state:', error);
       biometricStore.update(s => ({
         ...s,
         loading: false,
@@ -213,7 +207,6 @@ export const biometricActions = {
     try {
       return await invoke<boolean>('should_authenticate_on_startup');
     } catch (error) {
-      console.error('Failed to check startup authentication requirement:', error);
       return false;
     }
   },

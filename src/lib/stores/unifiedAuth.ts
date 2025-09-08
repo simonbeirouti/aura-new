@@ -104,6 +104,7 @@ class UnifiedAuthStore {
   private refreshTimer: NodeJS.Timeout | null = null;
   private iapSyncTimer: NodeJS.Timeout | null = null;
   private healthCheckTimer: NodeJS.Timeout | null = null;
+  private lifecycleListenersAdded = false;
 
   // Store subscription
   subscribe = this.store.subscribe;
@@ -113,6 +114,12 @@ class UnifiedAuthStore {
     this.store,
     $state => $state.isInitialized && !$state.isLoading
   );
+
+  // Initialize app lifecycle management
+  private lifecycleInitialized = (() => {
+    this.initializeAppLifecycle();
+    return true;
+  })();
 
 
   /**
@@ -124,16 +131,8 @@ class UnifiedAuthStore {
     // Check if we're already in a logged-out state (isInitialized: true, isAuthenticated: false)
     // This prevents re-initialization after logout
     const currentState = get(this.store);
-    console.log('UnifiedAuth initialize - current state:', {
-      isInitialized: currentState.isInitialized,
-      isAuthenticated: currentState.isAuthenticated,
-      isLoading: currentState.isLoading,
-      hasUser: !!currentState.user,
-      hasSession: !!currentState.session
-    });
 
     if (currentState.isInitialized && !currentState.isAuthenticated && !currentState.isLoading) {
-      console.log('Already in logged-out state, skipping initialization');
       return {
         authReady: false,
         profileReady: false,
@@ -144,7 +143,6 @@ class UnifiedAuthStore {
 
     // Force reset to unauthenticated state on app restart to ensure clean slate
     // This prevents cached authentication state from persisting across app restarts
-    console.log('Forcing reset to unauthenticated state for clean initialization');
     this.store.set({
       isInitialized: false,
       isAuthenticated: false,
@@ -182,33 +180,17 @@ class UnifiedAuthStore {
       // Step 3: Additional validation - double-check if we're really authenticated
       // Re-enabled with better timing and error handling
       const currentState = get(this.store);
-      console.log('Step 3 validation - current state:', {
-        isAuthenticated: currentState.isAuthenticated,
-        hasUser: !!currentState.user,
-        hasSession: !!currentState.session
-      });
 
       if (currentState.isAuthenticated && currentState.user) {
         // Add delay to allow Supabase session to fully establish
         await new Promise(resolve => setTimeout(resolve, 1000));
 
         try {
-          console.log('Performing additional Supabase session validation...');
-
           // Try to get a fresh session from Supabase to validate
           const { data: { session }, error } = await supabase.auth.getSession();
-          console.log('Supabase session validation result:', {
-            hasSession: !!session,
-            hasError: !!error,
-            sessionUserId: session?.user?.id,
-            storedUserId: currentState.user.id
-          });
 
           if (error || !session || !session.user) {
             console.warn('Session validation failed:', error?.message || 'No session');
-            // Don't immediately reset authentication - give it another chance
-            console.log('Retrying session validation in 2 seconds...');
-
             // Wait and retry once
             await new Promise(resolve => setTimeout(resolve, 2000));
             const { data: { session: retrySession }, error: retryError } = await supabase.auth.getSession();
@@ -217,8 +199,6 @@ class UnifiedAuthStore {
               console.error('Session validation failed on retry, resetting authentication');
               await this.setUnauthenticated('Session validation failed after retry');
               result.authReady = false;
-            } else {
-              console.log('Session validation passed on retry');
             }
           } else {
             // Validate that the session user matches our stored user
@@ -226,8 +206,6 @@ class UnifiedAuthStore {
               console.warn('Session user mismatch, resetting authentication');
               await this.setUnauthenticated('Session user mismatch');
               result.authReady = false;
-            } else {
-              console.log('Session validation passed - user matches');
             }
           }
         } catch (validationError) {
@@ -236,8 +214,6 @@ class UnifiedAuthStore {
           console.warn('Session validation failed due to error, but keeping authentication state');
           // result.authReady remains true from initializeAuth success
         }
-      } else {
-        console.log('Skipping session validation - not authenticated');
       }
 
       // Step 4: Load profile if authenticated
@@ -355,22 +331,38 @@ class UnifiedAuthStore {
       // Import cache manager dynamically to avoid circular dependencies
       const { cacheManager } = await import('./cacheManager');
 
-      // Clear cache if it's older than 1 hour (app was closed for a while)
-      const lastCacheUpdate = cacheManager.getStats().lastCleanup;
-      const oneHourAgo = Date.now() - (60 * 60 * 1000);
+      const now = Date.now();
+      const cacheStats = cacheManager.getStats();
+      const lastCacheUpdate = cacheStats.lastCleanup;
 
-      if (lastCacheUpdate < oneHourAgo) {
-        console.log('Clearing stale cache data due to long inactivity');
+      // Only clear cache if it's older than 2 hours AND the app has been inactive for more than 30 minutes
+      // This prevents clearing cache on quick app restarts
+      const twoHoursAgo = now - (2 * 60 * 60 * 1000); // 2 hours
+      const thirtyMinutesAgo = now - (30 * 60 * 1000); // 30 minutes
+
+      // Check if we have a recent activity timestamp
+      const state = get(this.store);
+      const lastActivity = state.lastActivity || 0;
+
+      // Only clear if both conditions are met:
+      // 1. Cache is older than 2 hours
+      // 2. App has been inactive for more than 30 minutes (to avoid clearing on quick restarts)
+      if (lastCacheUpdate < twoHoursAgo && lastActivity < thirtyMinutesAgo) {
         cacheManager.clear();
       }
 
-      // Also clear any user-specific cache that's older than 30 minutes
-      // This ensures fresh data after app restart
-      const cacheKeys = cacheManager.getStats();
-      // Note: We'll implement more sophisticated cache invalidation in the cache manager itself
+      // Clear only expired entries instead of full cache clear for more targeted cleanup
+      // This preserves valid cache entries while removing only truly stale data
+      try {
+        // Note: This would be implemented in the cache manager itself
+        // For now, we rely on the time-based checks above
+      } catch (selectiveClearError) {
+        console.warn('Selective cache cleanup failed, continuing with existing cache:', selectiveClearError);
+      }
 
     } catch (error) {
       console.warn('Failed to clear stale cache data:', error);
+      // Don't fail initialization if cache cleanup fails
     }
   }
 
@@ -397,11 +389,9 @@ class UnifiedAuthStore {
       }
 
       if (hasValidSession) {
-        console.log('Valid session found, attempting to restore from stored tokens...');
         // Try to restore session from stored tokens with enhanced validation
         const tokens = await sessionStore.getStoredTokens();
         if (tokens) {
-          console.log('Tokens retrieved, attempting Supabase session restoration...');
           // Check if we have a recent session state with valid expiry
           const currentState = get(this.store);
           const now = Date.now();
@@ -417,7 +407,6 @@ class UnifiedAuthStore {
                 throw new Error('Missing Supabase configuration');
               }
 
-              console.log('Setting Supabase session with stored tokens...');
               // Set the session using stored tokens
               const { data, error } = await supabase.auth.setSession({
                 access_token: tokens.accessToken,
@@ -425,9 +414,7 @@ class UnifiedAuthStore {
               });
 
               if (!error && data.session) {
-                console.log('Supabase session restored successfully, setting authenticated state...');
                 await this.setAuthenticated(data.session.user, data.session);
-                console.log('Authentication state set successfully');
                 return true;
               } else {
                 console.warn('Failed to restore session with stored tokens:', error);
@@ -435,8 +422,6 @@ class UnifiedAuthStore {
             } catch (restoreError) {
               console.warn('Session restoration failed:', restoreError);
             }
-          } else {
-            console.log('Stored tokens are expired or close to expiry');
           }
         } else {
           console.warn('No stored tokens found despite valid session check');
@@ -445,7 +430,6 @@ class UnifiedAuthStore {
 
       // Fallback: Check current Supabase session (fresh validation)
       // Only check this if we didn't successfully restore from stored tokens above
-      console.log('Checking for existing Supabase session as fallback...');
       const { data: { session: currentSession }, error: sessionError } = await supabase.auth.getSession();
 
       if (sessionError) {
@@ -458,16 +442,12 @@ class UnifiedAuthStore {
         const sessionExpiry = currentSession.expires_at ? currentSession.expires_at * 1000 : null;
 
         if (!sessionExpiry || sessionExpiry > now) {
-          console.log('Valid Supabase session found via fallback, setting authenticated');
           await this.setAuthenticated(currentSession.user, currentSession);
           return true;
-        } else {
-          console.log('Supabase session is expired');
         }
       }
 
       // No valid session found anywhere
-      console.log('No valid session found after all checks, setting unauthenticated');
       await this.setUnauthenticated();
       return false; // Return false to indicate no authentication was established
 
@@ -485,14 +465,6 @@ class UnifiedAuthStore {
    */
   private async setAuthenticated(user: User, session: AuthSession): Promise<void> {
     const now = Date.now();
-    console.log('🔐 Setting authenticated state for user:', user.id);
-
-    const previousState = get(this.store);
-    console.log('Previous auth state:', {
-      wasAuthenticated: previousState.isAuthenticated,
-      hadUser: !!previousState.user,
-      hadSession: !!previousState.session
-    });
 
     this.store.update(state => ({
       ...state,
@@ -504,8 +476,6 @@ class UnifiedAuthStore {
       lastActivity: now,
       tokenExpiresAt: session.expires_at ? session.expires_at * 1000 : null
     }));
-
-    console.log('✅ Authenticated state updated in unifiedAuth store');
 
     // Store tokens securely in Tauri and session store
     try {
@@ -555,8 +525,6 @@ class UnifiedAuthStore {
    * Set unauthenticated state
    */
   private async setUnauthenticated(error?: string): Promise<void> {
-    console.log('Setting unauthenticated state, error:', error);
-
     // Clear timers
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
@@ -759,7 +727,6 @@ class UnifiedAuthStore {
    */
   async refreshSession(): Promise<void> {
     try {
-      console.log('🔄 Attempting session refresh...');
       const { data, error } = await supabase.auth.refreshSession();
 
       if (error) {
@@ -768,7 +735,6 @@ class UnifiedAuthStore {
       }
 
       if (data.session && data.user) {
-        console.log('✅ Session refresh successful');
         await this.setAuthenticated(data.user, data.session);
       } else {
         console.warn('❌ Session refresh returned no session');
@@ -793,9 +759,7 @@ class UnifiedAuthStore {
     }
 
     try {
-      console.log('Refreshing profile from database for user:', state.user.id);
       const profile = await dataActions.getUserProfile(state.user.id, false); // Force refresh from database
-      console.log('Profile fetched from database:', profile);
 
       this.store.update(s => ({
         ...s,
@@ -803,7 +767,6 @@ class UnifiedAuthStore {
         profileLoaded: true,
         onboardingCompleted: profile?.onboarding_complete || false
       }));
-      console.log('Profile updated in store');
     } catch (error) {
       console.warn('Profile refresh failed:', error);
       // Even on failure, mark profile as loaded to prevent UI getting stuck
@@ -817,7 +780,6 @@ class UnifiedAuthStore {
    * Handle onboarding completion
    */
   async completeOnboarding(): Promise<void> {
-    console.log('completeOnboarding called - marking onboarding as completed');
     // Mark onboarding as completed in the store
     this.store.update(state => ({
       ...state,
@@ -825,7 +787,6 @@ class UnifiedAuthStore {
       // Also update the profile onboarding_complete field if it exists
       profile: state.profile ? { ...state.profile, onboarding_complete: true } : state.profile
     }));
-    console.log('Local onboardingCompleted flag set to true');
 
     // Wait a bit for database changes to be committed before refreshing
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -833,7 +794,6 @@ class UnifiedAuthStore {
     // Refresh profile from database to get updated onboarding_complete field
     try {
       await this.refreshProfile();
-      console.log('Profile refreshed from database after onboarding completion');
     } catch (error) {
       console.warn('Profile refresh failed after onboarding completion, but continuing:', error);
     }
@@ -1012,7 +972,6 @@ class UnifiedAuthStore {
       // Clear data store
       dataStore.reset();
 
-      console.log('All caches cleared successfully');
     } catch (error) {
       console.warn('Some caches failed to clear:', error);
       // Continue with logout even if some caches fail to clear
@@ -1054,15 +1013,15 @@ class UnifiedAuthStore {
       clearInterval(this.healthCheckTimer);
     }
 
-    // Run health check every 10 minutes (reduced frequency)
+    // Run health check every 30 minutes (reduced frequency significantly)
     this.healthCheckTimer = setInterval(async () => {
       await this.performHealthCheck();
-    }, 10 * 60 * 1000); // 10 minutes
+    }, 30 * 60 * 1000); // 30 minutes
 
-    // Run first health check after 2 minutes (delayed start)
+    // Run first health check after 10 minutes (delayed start to allow app to fully initialize)
     setTimeout(async () => {
       await this.performHealthCheck();
-    }, 2 * 60 * 1000); // 2 minutes
+    }, 10 * 60 * 1000); // 10 minutes
   }
 
   /**
@@ -1083,13 +1042,27 @@ class UnifiedAuthStore {
     const minAuthAge = 5 * 60 * 1000; // 5 minutes
 
     if (authAge < minAuthAge) {
-      console.log('🔍 Skipping health check - authentication too recent');
+      return;
+    }
+
+    // Skip health check if app is not visible (user might be away)
+    if (typeof document !== 'undefined' && document.hidden) {
+      return;
+    }
+
+    // Skip health check if there are active loading operations
+    if (state.isLoading) {
+      return;
+    }
+
+    // Skip health check if app has been inactive for more than 1 hour
+    // (user probably closed the app or is away)
+    const oneHour = 60 * 60 * 1000;
+    if (state.lastActivity && (now - state.lastActivity) > oneHour) {
       return;
     }
 
     try {
-      console.log('🔍 Performing health check...');
-
       // Check 1: Session validity (be very gentle - don't refresh on minor issues)
       let sessionValid = true;
       try {
@@ -1100,10 +1073,8 @@ class UnifiedAuthStore {
         if (!sessionValid) {
           const tokens = await sessionStore.getStoredTokens();
           if (tokens) {
-            console.log('⚠️ Tokens exist but session validation failed - skipping refresh to avoid auth reset');
             sessionValid = true; // Consider valid if tokens exist
           } else {
-            console.log('⚠️ No tokens found, attempting gentle refresh...');
             await this.gentleSessionRefresh();
             return;
           }
@@ -1119,15 +1090,13 @@ class UnifiedAuthStore {
           const needsRefresh = sessionStore.isTokenRefreshNeeded();
           if (needsRefresh) {
             // Only refresh if we're not too close to expiry (avoid unnecessary refreshes)
-            const state = get(this.store);
-            if (state.tokenExpiresAt) {
-              const timeToExpiry = state.tokenExpiresAt - now;
-              const safeRefreshWindow = 15 * 60 * 1000; // 15 minutes
+            const currentState = get(this.store);
+            if (currentState.tokenExpiresAt) {
+              const timeToExpiry = currentState.tokenExpiresAt - now;
+              const safeRefreshWindow = 20 * 60 * 1000; // Increased to 20 minutes
 
               if (timeToExpiry > safeRefreshWindow) {
-                console.log('⚠️ Token refresh needed but not urgent, skipping...');
               } else {
-                console.log('⚠️ Token refresh needed soon, attempting gentle refresh...');
                 await this.gentleSessionRefresh();
                 return;
               }
@@ -1139,16 +1108,15 @@ class UnifiedAuthStore {
         }
       }
 
-      // Check 3: Cache validity (clear old cache) - only if session is stable
-      if (sessionValid) {
+      // Check 3: Cache validity (clear old cache) - only if session is stable and app is active
+      if (sessionValid && !document.hidden) {
         try {
           const { cacheManager } = await import('./cacheManager');
           const lastCleanup = cacheManager.getStats().lastCleanup;
           const now = Date.now();
-          const twoHours = 2 * 60 * 60 * 1000; // Increased to 2 hours to reduce frequency
+          const threeHours = 3 * 60 * 60 * 1000; // Increased to 3 hours to reduce frequency
 
-          if (now - lastCleanup > twoHours) {
-            console.log('🧹 Clearing stale cache...');
+          if (now - lastCleanup > threeHours) {
             cacheManager.clear();
           }
         } catch (cacheError) {
@@ -1157,21 +1125,18 @@ class UnifiedAuthStore {
       }
 
       // Check 4: Profile data freshness (only refresh if onboarding is complete and it's been a while)
-      if (state.profileLoaded && state.profile && state.onboardingCompleted && sessionValid) {
+      if (state.profileLoaded && state.profile && state.onboardingCompleted && sessionValid && !document.hidden) {
         try {
-          const profileAge = Date.now() - (state.lastActivity || 0);
-          const maxProfileAge = 60 * 60 * 1000; // Increased to 1 hour to reduce frequency
+          const profileAge = now - (state.lastActivity || 0);
+          const maxProfileAge = 90 * 60 * 1000; // Increased to 1.5 hours to reduce frequency
 
           if (profileAge > maxProfileAge) {
-            console.log('📋 Refreshing stale profile data...');
             await this.refreshProfile();
           }
         } catch (profileError) {
           console.warn('⚠️ Profile refresh error during health check:', profileError);
         }
       }
-
-      console.log('✅ Health check completed successfully');
 
     } catch (error) {
       console.warn('⚠️ Health check failed:', error);
@@ -1184,7 +1149,6 @@ class UnifiedAuthStore {
    */
   private async gentleSessionRefresh(): Promise<void> {
     try {
-      console.log('🔄 Attempting gentle session refresh...');
       const { data, error } = await supabase.auth.refreshSession();
 
       if (error) {
@@ -1194,7 +1158,6 @@ class UnifiedAuthStore {
       }
 
       if (data.session && data.user) {
-        console.log('✅ Gentle session refresh successful');
         await this.setAuthenticated(data.user, data.session);
       } else {
         console.warn('⚠️ Gentle session refresh returned no session');
@@ -1206,20 +1169,170 @@ class UnifiedAuthStore {
   }
 
   /**
-   * Destroy store and cleanup
+   * Initialize app lifecycle management
    */
-  destroy(): void {
+  private initializeAppLifecycle(): void {
+    // Prevent duplicate event listener registration
+    if (this.lifecycleListenersAdded || typeof document === 'undefined') {
+      return;
+    }
+
+    this.lifecycleListenersAdded = true;
+
+    // Handle app visibility changes (foreground/background)
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        this.handleAppForeground();
+      } else {
+        this.handleAppBackground();
+      }
+    });
+
+    // Handle page focus/blur events
+    window.addEventListener('focus', () => {
+      this.handleWindowFocus();
+    });
+
+    window.addEventListener('blur', () => {
+      this.handleWindowBlur();
+    });
+
+    // Handle beforeunload to save state
+    window.addEventListener('beforeunload', () => {
+      this.handleAppClosing();
+    });
+  }
+
+  /**
+   * Handle app coming to foreground
+   */
+  private async handleAppForeground(): Promise<void> {
+    const state = get(this.store);
+
+    // Only perform validation if we have an authenticated user
+    if (state.isAuthenticated && state.user) {
+      try {
+
+        // Check if it's been a while since last activity
+        const now = Date.now();
+        const timeSinceLastActivity = now - (state.lastActivity || 0);
+        const fiveMinutes = 5 * 60 * 1000;
+
+        if (timeSinceLastActivity > fiveMinutes) {
+          // Perform a gentle session validation
+          await this.gentleSessionRefresh();
+
+          // Refresh user balance if available
+          try {
+            const { userStore } = await import('./userStore');
+            await userStore.refreshTokenBalance();
+          } catch (error) {
+            // Non-critical
+          }
+        }
+
+        // Update last activity
+        this.store.update(s => ({ ...s, lastActivity: now }));
+
+      } catch (error) {
+        console.warn('⚠️ Foreground session validation failed:', error);
+        // Don't reset auth on foreground validation failure
+      }
+    }
+  }
+
+  /**
+   * Handle app going to background
+   */
+  private handleAppBackground(): void {
+    // Clear any pending timers that shouldn't run in background
+    // Keep essential timers like health check and token refresh
+    const now = Date.now();
+    this.store.update(s => ({ ...s, lastActivity: now }));
+  }
+
+  /**
+   * Handle window focus
+   */
+  private async handleWindowFocus(): Promise<void> {
+    const state = get(this.store);
+
+    // Quick session check on focus if needed
+    if (state.isAuthenticated && state.tokenExpiresAt) {
+      const now = Date.now();
+      const timeToExpiry = state.tokenExpiresAt - now;
+      const urgentRefreshThreshold = 2 * 60 * 1000; // 2 minutes
+
+      if (timeToExpiry > 0 && timeToExpiry < urgentRefreshThreshold) {
+        await this.gentleSessionRefresh();
+      }
+    }
+  }
+
+  /**
+   * Handle window blur
+   */
+  private handleWindowBlur(): void {
+    // Save any pending state changes
+    this.store.update(s => ({ ...s, lastActivity: Date.now() }));
+  }
+
+  /**
+   * Handle app closing
+   */
+  private async handleAppClosing(): Promise<void> {
+    try {
+      // Save any pending state
+      await storeManager.saveAll();
+
+      // Clear timers
+      if (this.refreshTimer) {
+        clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+      }
+      if (this.iapSyncTimer) {
+        clearTimeout(this.iapSyncTimer);
+        this.iapSyncTimer = null;
+      }
+      if (this.healthCheckTimer) {
+        clearInterval(this.healthCheckTimer);
+        this.healthCheckTimer = null;
+      }
+    } catch (error) {
+      console.warn('Error during app closing cleanup:', error);
+    }
+  }
+
+  /**
+   * Emergency cleanup for background operations
+   */
+  emergencyCleanup(): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
+
     if (this.iapSyncTimer) {
       clearTimeout(this.iapSyncTimer);
       this.iapSyncTimer = null;
     }
+
     if (this.healthCheckTimer) {
       clearInterval(this.healthCheckTimer);
       this.healthCheckTimer = null;
+    }
+  }
+
+  /**
+   * Destroy store and cleanup
+   */
+  destroy(): void {
+    this.emergencyCleanup();
+
+    // Remove event listeners if they exist
+    if (typeof document !== 'undefined') {
+      // Note: We can't remove the listeners here as we don't have references to them
+      // They will be cleaned up when the page unloads
     }
   }
 }
@@ -1247,15 +1360,7 @@ export const shouldShowApp = derived(authStore.getStore(), $state => {
 
   // Don't show app until everything is fully initialized
   if (!isInitialized) {
-    console.log('shouldShowApp: false - system not initialized yet');
     return false;
-  }
-
-  // Debug logging with more detail
-  if (result) {
-    console.log('✅ shouldShowApp: true - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'hasProfile:', !!profile, 'profile.onboarding_complete:', profile?.onboarding_complete);
-  } else {
-    console.log('❌ shouldShowApp: false - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'hasProfile:', !!profile, 'profile.onboarding_complete:', profile?.onboarding_complete, 'isInitialized:', isInitialized);
   }
 
   // Show app if authenticated and profile loaded, regardless of onboarding status
@@ -1280,13 +1385,6 @@ export const shouldShowOnboarding = derived(authStore.getStore(), $state => {
   const shouldShowOnboardingFlow = !profile || profile.onboarding_complete === false || profile.onboarding_complete === null || profile.onboarding_complete === undefined;
 
   const result = isAuthenticated && profileLoaded && shouldShowOnboardingFlow;
-
-  // Debug logging
-  if (result) {
-    console.log('shouldShowOnboarding: true - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'shouldShowOnboardingFlow:', shouldShowOnboardingFlow, 'profile.onboarding_complete:', profile?.onboarding_complete);
-  } else {
-    console.log('shouldShowOnboarding: false - isAuthenticated:', isAuthenticated, 'profileLoaded:', profileLoaded, 'shouldShowOnboardingFlow:', shouldShowOnboardingFlow, 'profile.onboarding_complete:', profile?.onboarding_complete);
-  }
 
   return result;
 });

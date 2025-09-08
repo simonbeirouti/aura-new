@@ -19,9 +19,12 @@ const initialLoadingState: LoadingState = {
 // Create the loading store
 function createLoadingStore() {
   const { subscribe, set, update } = writable<LoadingState>(initialLoadingState);
-  
+
   // Stack to handle multiple loading operations
   const loadingStack: LoadingState[] = [];
+
+  // Timeout tracking for automatic recovery
+  const timeoutMap = new Map<string, NodeJS.Timeout>();
 
   return {
     subscribe,
@@ -37,6 +40,27 @@ function createLoadingStore() {
 
       loadingStack.push(loadingState);
       set(loadingState);
+
+      // Set up automatic timeout recovery (5 minutes max for any loading operation)
+      const timeoutId = setTimeout(() => {
+        console.warn(`Loading operation ${loadingState.id} timed out, forcing hide`);
+        // Remove from stack and clear timeout
+        const index = loadingStack.findIndex(loading => loading.id === loadingState.id);
+        if (index !== -1) {
+          loadingStack.splice(index, 1);
+          timeoutMap.delete(loadingState.id);
+
+          // Show next loading in stack or hide completely
+          if (loadingStack.length > 0) {
+            set(loadingStack[loadingStack.length - 1]);
+          } else {
+            set(initialLoadingState);
+          }
+        }
+      }, 5 * 60 * 1000); // 5 minutes
+
+      // Store timeout reference
+      timeoutMap.set(loadingState.id, timeoutId);
     },
     
     // Update current loading progress
@@ -51,17 +75,30 @@ function createLoadingStore() {
     
     // Hide current loading (removes from stack)
     hide: (id?: string) => {
+      let removedId: string | undefined;
+
       if (id) {
         // Remove specific loading by ID
         const index = loadingStack.findIndex(loading => loading.id === id);
         if (index !== -1) {
+          removedId = loadingStack[index].id;
           loadingStack.splice(index, 1);
         }
       } else {
         // Remove most recent loading
-        loadingStack.pop();
+        const removed = loadingStack.pop();
+        removedId = removed?.id;
       }
-      
+
+      // Clear timeout for the removed loading operation
+      if (removedId) {
+        const timeoutId = timeoutMap.get(removedId);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutMap.delete(removedId);
+        }
+      }
+
       // Show next loading in stack or hide completely
       if (loadingStack.length > 0) {
         set(loadingStack[loadingStack.length - 1]);
@@ -72,6 +109,12 @@ function createLoadingStore() {
     
     // Clear all loading states
     clear: () => {
+      // Clear all timeouts
+      for (const timeoutId of timeoutMap.values()) {
+        clearTimeout(timeoutId);
+      }
+      timeoutMap.clear();
+
       loadingStack.length = 0;
       set(initialLoadingState);
     },

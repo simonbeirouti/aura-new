@@ -21,25 +21,9 @@
   let permissionGranted = false;
   let actionTypesInitialized = false;
 
-  // Reactive: Check if user can afford each product
   $: canAffordProduct = (tokenCost: number) => {
-    const canAfford = $availableTokens >= tokenCost;
-    console.log(`💰 Can afford product costing ${tokenCost} tokens? ${canAfford} (available: ${$availableTokens})`);
-    return canAfford;
+    return $availableTokens >= tokenCost;
   };
-
-  // Reactive: Log token balance changes and refresh when low
-  $: if ($availableTokens !== undefined) {
-    console.log(`💵 Token balance updated: ${$availableTokens} tokens available`);
-
-    // If balance is very low (≤ 5 tokens), force a refresh to ensure accuracy
-    if ($availableTokens <= 5 && $userStore.isInitialized && $userStore.userId) {
-      console.log(`⚠️ Low token balance detected (${$availableTokens}), forcing balance refresh`);
-      setTimeout(() => {
-        userStore.refreshTokenBalance(true);
-      }, 500);
-    }
-  }
 
   // Reactive: Ensure products are loaded when user becomes authenticated
   $: if ($centralizedAuth.isAuthenticated && $centralizedAuth.isInitialized && $products.length === 0 && !$productsLoading) {
@@ -102,14 +86,12 @@
 
     // Additional check: Prevent multiple clicks on same product
     if ($purchaseLoading[productId]) {
-      console.log(`Purchase already in progress for ${productId}, ignoring click`);
       return;
     }
 
     // Check token balance before attempting purchase
     const product = purchaseManager.getProduct(productId);
     if (product && !canAffordProduct(product.token_cost)) {
-      console.log(`❌ UI check failed: Cannot afford ${productId} (cost: ${product.token_cost}, available: ${$availableTokens})`);
       toast.error("You don't have enough tokens. Redirecting to purchase more...");
       setTimeout(() => {
         goto('/packages');
@@ -118,11 +100,7 @@
     }
 
     try {
-      console.log(`🛒 Starting purchase flow for ${productId} (available tokens: ${$availableTokens})`);
-
       await purchaseManager.purchaseProduct(productId, userId);
-
-      console.log(`✅ Purchase flow completed for ${productId}`);
 
       // Show success toast
       const product = purchaseManager.getProduct(productId);
@@ -130,31 +108,9 @@
 
       // Immediately refresh balance from database to ensure UI reflects purchase
       // IAP listener will also update, but this ensures immediate feedback
-      console.log(`🔄 Refreshing balance after successful purchase for ${productId}`);
-      if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
-        (window as any).logPlatformEvent('info', `Refreshing balance after purchase for ${productId}`, {
-          productId,
-          action: 'balance_refresh_after_purchase'
-        });
-      }
       try {
         await userStore.refreshTokenBalance(true);
-        console.log(`✅ Balance refreshed after purchase for ${productId}`);
-        if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
-          (window as any).logPlatformEvent('info', `Balance successfully refreshed after purchase for ${productId}`, {
-            productId,
-            action: 'balance_refresh_success'
-          });
-        }
       } catch (balanceError) {
-        console.warn(`⚠️ Failed to refresh balance after purchase:`, balanceError);
-        if (typeof window !== 'undefined' && (window as any).logPlatformEvent) {
-          (window as any).logPlatformEvent('error', `Failed to refresh balance after purchase for ${productId}`, {
-            productId,
-            error: balanceError instanceof Error ? balanceError.message : String(balanceError),
-            action: 'balance_refresh_failed'
-          });
-        }
         // Don't fail the purchase if balance refresh fails - IAP listener might still work
       }
 
@@ -163,13 +119,11 @@
       const errorMessage = err instanceof Error ? err.message : "Purchase failed";
 
       if (errorMessage === "Purchase already in progress") {
-        console.log(`⚠️ Purchase already in progress for ${productId}`);
         return; // Don't show error toast for this
       }
 
       // Handle insufficient tokens error specifically
       if (errorMessage === "INSUFFICIENT_TOKENS") {
-        console.log(`💰 Insufficient tokens detected for ${productId}, redirecting to packages`);
         toast.error("You don't have enough tokens. Redirecting to purchase more...");
 
         // Small delay to allow toast to show, then redirect
@@ -178,8 +132,6 @@
         }, 1500);
         return;
       }
-
-      console.error(`❌ Purchase failed for ${productId}:`, errorMessage);
       toast.error(errorMessage);
     }
   }

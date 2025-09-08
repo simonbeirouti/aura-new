@@ -141,7 +141,7 @@
       (window as any).logPlatformEvent = (level: string, message: string, data?: any) => {
         // Only log critical errors to console when debugger is disabled
         if (level === 'error') {
-          console.error(`[Platform] ${message}`, data);
+          // Silently ignore errors when debugger is disabled
         }
       };
     }
@@ -150,11 +150,8 @@
   onMount(() => {
     // Only set up subscriptions if debugger is enabled to prevent performance issues
     if (!isEnabled) {
-      console.log('FloatingDebugger: Disabled - not subscribing to stores');
       return;
     }
-
-    console.log('FloatingDebugger: Enabled - setting up store subscriptions');
 
     // Subscribe to all stores with debounced logging to prevent infinite loops
     unsubscribes = [

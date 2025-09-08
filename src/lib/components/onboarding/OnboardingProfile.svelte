@@ -176,18 +176,14 @@
     }
 
     async function completeOnboarding(isSkipped = false) {
-        console.log('completeOnboarding called with isSkipped:', isSkipped);
-
         const authState = get(centralizedAuth.getStore());
 
         if (!authState?.user) {
-            console.log('No authenticated user found, cannot complete onboarding');
             return;
         }
 
         const userId = authState.user.id;
         const userEmail = authState.user.email;
-        console.log('Starting onboarding completion for user:', userId);
         isSaving = true;
 
         try {
@@ -199,29 +195,17 @@
                 onboarding_complete: true,
             };
 
-            console.log('Creating/updating profile with payload:', profilePayload);
-
             // Try to get existing profile first
             let existingProfile = null;
             try {
-                console.log('Fetching existing profile for user:', userId);
                 existingProfile = await dataStore.getUserProfile(userId);
-                console.log('Existing profile found:', existingProfile);
             } catch (error) {
-                console.log('No existing profile found, will create new one. Error:', error);
                 // No existing profile found, will create new one
             }
 
             let updatedProfile;
             if (existingProfile) {
                 // Update existing profile
-                console.log('Updating existing profile:', existingProfile);
-                console.log('Update payload:', {
-                    full_name: profilePayload.full_name,
-                    username: profilePayload.username,
-                    avatar_url: profilePayload.avatar_url,
-                    onboarding_complete: profilePayload.onboarding_complete,
-                });
                 try {
                     updatedProfile = await dataStore.updateUserProfile(userId, {
                         full_name: profilePayload.full_name,
@@ -229,20 +213,11 @@
                         avatar_url: profilePayload.avatar_url,
                         onboarding_complete: profilePayload.onboarding_complete,
                     });
-                    console.log('Profile updated successfully:', updatedProfile);
-                    console.log('Onboarding complete status in updated profile:', updatedProfile?.onboarding_complete);
                 } catch (updateError) {
-                    console.error('Profile update failed:', updateError);
                     throw updateError;
                 }
             } else {
                 // Create new profile
-                console.log('Creating new profile with payload:', {
-                    full_name: profilePayload.full_name,
-                    username: profilePayload.username,
-                    avatar_url: profilePayload.avatar_url,
-                    onboarding_complete: profilePayload.onboarding_complete,
-                });
                 try {
                     updatedProfile = await dataStore.createUserProfile(userId, {
                         full_name: profilePayload.full_name,
@@ -250,27 +225,19 @@
                         avatar_url: profilePayload.avatar_url,
                         onboarding_complete: profilePayload.onboarding_complete,
                     });
-                    console.log('Profile created successfully:', updatedProfile);
-                    console.log('Onboarding complete status in created profile:', updatedProfile?.onboarding_complete);
                 } catch (createError) {
-                    console.error('Profile creation failed:', createError);
                     throw createError;
                 }
             }
 
             // Update the profile in the store directly instead of relying on refresh
-            console.log('Updating profile in auth store directly');
             const authState = get(centralizedAuth.getStore());
-            console.log('Current profile in store:', authState.profile);
-            console.log('Update payload:', profilePayload);
 
             const updatedProfileInStore = {
                 ...authState.profile,
                 ...profilePayload,
                 updated_at: new Date().toISOString()
             };
-
-            console.log('Updated profile object:', updatedProfileInStore);
 
             // Update the auth store directly
             centralizedAuth.getStore().update(state => ({
@@ -279,14 +246,11 @@
                 profileLoaded: true
             }));
 
-            console.log('Profile updated in store:', updatedProfileInStore);
-
             // Also try to refresh from database as backup
             try {
                 await centralizedAuth.refreshProfile();
-                console.log('Profile refresh completed as backup');
             } catch (refreshError) {
-                console.warn('Profile refresh failed, but store was updated directly:', refreshError);
+                // Continue silently on refresh error
             }
 
             // Clear form data

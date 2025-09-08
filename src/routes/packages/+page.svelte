@@ -26,80 +26,55 @@
   // Initialize IAP immediately when component is created
   async function initializeIAPImmediately() {
     try {
-      console.log('🚀 Starting immediate IAP initialization...');
-
       // Check if already initialized and recent (reduce cache time for faster refresh)
       if (state.isInitialized && state.lastInitialized &&
           (Date.now() - state.lastInitialized) < (2 * 60 * 1000)) { // 2 minutes instead of 5
-        console.log('✅ IAP already initialized and fresh');
         isInitializing = false;
         return;
       }
 
       const result = await iapStore.initialize();
-      console.log('🔧 IAP initialization result:', result);
 
       if (result) {
-        console.log('🎧 Setting up purchase listener...');
         iapStore.setupPurchaseListener();
 
-        console.log('📦 Loading consumable products immediately...');
-        console.log('📋 Product IDs to load:', iapProductConfig.consumables.map(p => p.id));
         try {
           await iapStore.queryProducts(iapProductConfig.consumables.map(p => p.id), "inapp");
-          console.log('✅ Consumable products loaded');
 
           // Verify products were loaded
           const currentState = get(iapStore);
-          console.log('📊 Products after loading:', currentState.products.length);
-          console.log('📋 Loaded product IDs:', currentState.products.map(p => p.productId));
 
           // If no products were loaded, try alternative approaches
           if (currentState.products.length === 0) {
-            console.log('🚨 No products loaded, trying alternative approaches...');
-
             // Try without product type
             try {
-              console.log('🔄 Trying to load products without type...');
               await iapStore.queryProducts(iapProductConfig.consumables.map(p => p.id));
-              const retryState = get(iapStore);
-              console.log('📊 Products after retry:', retryState.products.length);
             } catch (retryError) {
-              console.warn('⚠️ Retry also failed:', retryError);
+              // Continue silently on retry error
             }
           }
         } catch (productError) {
-          console.warn('⚠️ Failed to load consumable products:', productError);
-          console.warn('🔍 Error details:', productError);
-
           // Try fallback: load without specifying product type
           try {
-            console.log('🔄 Trying fallback product loading...');
             await iapStore.queryProducts(iapProductConfig.consumables.map(p => p.id));
-            console.log('✅ Fallback product loading completed');
           } catch (fallbackError) {
-            console.warn('⚠️ Fallback also failed:', fallbackError);
+            // Continue silently on fallback error
           }
         }
 
         // Only restore if no purchases exist
         if (state.purchases.length === 0) {
-          console.log('🔄 Restoring purchases...');
           try {
             await iapStore.restorePurchases("inapp");
-            console.log('✅ Purchases restored');
           } catch (restoreError) {
-            console.warn('⚠️ Failed to restore purchases:', restoreError);
+            // Continue silently on restore error
           }
         }
-      } else {
-        console.error('❌ IAP initialization failed');
       }
     } catch (error) {
-      console.error('❌ IAP initialization failed:', error);
+      // Continue silently on initialization error
     } finally {
       isInitializing = false;
-      console.log('🎉 IAP initialization complete');
     }
   }
 
@@ -109,23 +84,20 @@
   // Retry function for manual product loading
   async function retryProductLoading() {
     retryCount++;
-    console.log(`🔄 Retry #${retryCount}: Loading products manually...`);
 
     try {
       isInitializing = true;
       await iapStore.queryProducts(iapProductConfig.consumables.map(p => p.id), "inapp");
 
       const currentState = get(iapStore);
-      console.log('📊 Products after manual retry:', currentState.products.length);
 
       if (currentState.products.length > 0) {
-        toast.success("✅ Products loaded successfully!");
+        toast.success("Products loaded successfully!");
       } else {
-        toast.error("❌ Still no products loaded. Please check your connection.");
+        toast.error("Still no products loaded. Please check your connection.");
       }
     } catch (error) {
-      console.error('❌ Manual retry failed:', error);
-      toast.error("❌ Failed to load products. Please try again.");
+      toast.error("Failed to load products. Please try again.");
     } finally {
       isInitializing = false;
     }
@@ -179,7 +151,6 @@
   onMount(() => {
     // Initialization already happened immediately, just mark as mounted
     initialized = true;
-    console.log('📱 Packages page mounted - IAP should already be ready');
   });
 
   onDestroy(() => {
@@ -200,38 +171,29 @@
     try {
       // Check if user is authenticated
       if (!sessionState?.isAuthenticated || !sessionState?.user?.id) {
-        toast.error("❌ Please log in to make purchases");
+        toast.error("Please log in to make purchases");
         return;
       }
 
       // Check if IAP is available
       if (!state.pluginAvailable) {
-        toast.error("❌ IAP not available on this device/platform");
+        toast.error("IAP not available on this device/platform");
         return;
       }
 
       // Show processing feedback
-      const processingToast = toast.loading("🔄 Initiating purchase...");
-
-      console.log('🚀 Starting purchase for product:', productId);
-      console.log('📱 IAP State:', {
-        isInitialized: state.isInitialized,
-        pluginAvailable: state.pluginAvailable,
-        canMakePayments: state.canMakePayments,
-        error: state.error
-      });
+      const processingToast = toast.loading("Initiating purchase...");
 
       // Initiate purchase - this will trigger the platform's purchase flow
       await iapStore.purchaseProduct(productId, "inapp");
 
       // Dismiss processing toast and show success
       toast.dismiss(processingToast);
-      toast.success("✅ Purchase initiated!");
+      toast.success("Purchase initiated!");
 
     } catch (error) {
-      console.error('Purchase failed:', error);
       toast.dismiss();
-      toast.error(`❌ Purchase error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      toast.error(`Purchase error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
       // Reset button state
       purchasingProduct = "";

@@ -120,7 +120,6 @@ class PurchaseManager {
     // Check if purchase is already in progress for this product
     const currentState = get(this.store);
     if (currentState.purchaseLoading[productId]) {
-      console.log(`Purchase already in progress for ${productId}, skipping`);
       throw new Error('Purchase already in progress');
     }
 
@@ -137,43 +136,29 @@ class PurchaseManager {
         throw new Error('Product not found');
       }
 
-      console.log(`🔄 Initiating purchase for ${productId} by user ${userId}`);
-      console.log(`📦 Product details:`, product);
-
       // Pre-purchase eligibility check - check against database in real-time
-      console.log(`🔍 Checking purchase eligibility before proceeding...`);
       try {
         const canPurchase = await invoke<boolean>('can_purchase_product', { userId, productId });
 
         if (!canPurchase) {
-          console.log(`❌ Purchase eligibility check failed for ${productId} - insufficient tokens`);
           throw new Error('INSUFFICIENT_TOKENS');
         }
-
-        console.log(`✅ Purchase eligibility confirmed for ${productId}`);
       } catch (eligibilityError) {
         if (eligibilityError instanceof Error && eligibilityError.message === 'INSUFFICIENT_TOKENS') {
           // Re-throw with specific error for UI handling
           throw new Error('INSUFFICIENT_TOKENS');
         }
-        // If eligibility check fails for other reasons, log but continue (might be network issue)
-        console.warn(`⚠️ Eligibility check failed, proceeding with purchase:`, eligibilityError);
+        // If eligibility check fails for other reasons, continue (might be network issue)
       }
 
       // Execute purchase through Tauri backend
-      console.log(`🚀 Calling Tauri backend purchase_product command...`);
       const purchase = await invoke('purchase_product', { productId, userId });
-
-      console.log(`✅ Purchase completed for ${productId}:`, purchase);
-      console.log(`💰 Purchase result:`, JSON.stringify(purchase, null, 2));
 
       // Invalidate relevant caches
       cacheManager.handlePurchaseCompletion(userId);
 
       // Also invalidate products cache in case purchase affects availability
       cacheManager.delete(PRODUCTS_CACHE_KEY);
-
-      console.log(`✅ Purchase ${productId} completed successfully`);
 
       // Clear purchase error for this product
       this.clearPurchaseError(productId);
@@ -184,22 +169,7 @@ class PurchaseManager {
       };
 
     } catch (err) {
-      console.error(`❌ Purchase failed for ${productId}:`, err);
-
-      // Log detailed error information
-      if (err instanceof Error) {
-        console.error(`🔍 Error details:`, {
-          name: err.name,
-          message: err.message,
-          stack: err.stack
-        });
-      } else {
-        console.error(`🔍 Non-Error object thrown:`, typeof err, err);
-      }
-
       const errorMessage = err instanceof Error ? err.message : 'Purchase failed';
-
-      console.error(`📝 Final error message: ${errorMessage}`);
 
       // Store error in state for UI feedback
       this.store.update(state => ({
@@ -272,10 +242,11 @@ class PurchaseManager {
 export const purchaseManager = new PurchaseManager();
 
 // Handle app visibility changes to clear stale purchase states
-if (typeof document !== 'undefined') {
+let visibilityListenerAdded = false;
+if (typeof document !== 'undefined' && !visibilityListenerAdded) {
+  visibilityListenerAdded = true;
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
-      console.log('📱 App came to foreground, clearing stale purchase states in purchase store');
       purchaseManager.clearAllPurchaseErrors();
 
       // Clear any loading states that might be stuck
